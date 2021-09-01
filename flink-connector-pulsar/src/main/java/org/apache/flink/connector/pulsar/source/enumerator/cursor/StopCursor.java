@@ -34,8 +34,8 @@ import java.io.Serializable;
 
 /**
  * An interface for users to specify the stop position of a pulsar subscription. Since it would be
- * serialized into split. The implementation for this interface should be well considered. I don't
- * recommend adding extra internal state for this implementation.
+ * serialized into split, the implementation for this interface should be well considered. It's not
+ * recommended to add extra internal state for this implementation.
  */
 @PublicEvolving
 @FunctionalInterface
