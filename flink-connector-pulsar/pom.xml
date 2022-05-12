@@ -35,7 +35,7 @@ under the License.
 	<packaging>jar</packaging>
 
 	<properties>
-		<pulsar.version>2.10.1</pulsar.version>
+		<pulsar.version>2.10.2</pulsar.version>
 		<protoc.version>3.21.7</protoc.version>
 
 		<!-- Test Libraries -->
@@ -47,7 +47,6 @@ under the License.
 	</properties>
 
 	<dependencies>
-
 		<!-- Core -->
 
 		<dependency>
@@ -56,6 +55,34 @@ under the License.
 			<version>${flink.version}</version>
 		</dependency>
 
+		<!-- Table ecosystem -->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-common</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-api-java-bridge</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-runtime</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
 		<!-- Connectors -->
 
 		<dependency>
@@ -71,8 +98,22 @@ under the License.
 			<groupId>com.google.protobuf</groupId>
 			<artifactId>protobuf-java</artifactId>
 			<version>${protoc.version}</version>
+		</dependency>
+
+		<!-- Format support -->
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-json</artifactId>
+			<version>${project.version}</version>
 			<scope>provided</scope>
-			<optional>true</optional>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-avro</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
 		</dependency>
 
 		<!-- Tests -->
@@ -97,6 +138,50 @@ under the License.
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-connector-test-utils</artifactId>
 			<version>${flink.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Pulsar Table Test Dependencies-->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-common</artifactId>
+			<version>${project.version}</version>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-api-scala-bridge_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Pulsar SQL IT test with formats -->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-avro-confluent-registry</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-csv</artifactId>
+			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -196,6 +281,20 @@ under the License.
 			<artifactId>flink-architecture-tests-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+
+		<!-- Add these two dependencies only for running docker on Github Action. Never commit to flink. -->
+		<dependency>
+			<groupId>net.java.dev.jna</groupId>
+			<artifactId>jna</artifactId>
+			<version>5.5.0</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>net.java.dev.jna</groupId>
+			<artifactId>jna-platform</artifactId>
+			<version>5.5.0</version>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 
@@ -231,6 +330,33 @@ under the License.
 		</extensions>
 
 		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<!-- Enforce single fork execution due to heavy mini cluster use in the tests -->
+					<forkCount>1</forkCount>
+					<argLine>-Xms256m -Xmx2048m -Dmvn.forkNumber=${surefire.forkNumber}
+						-XX:-UseGCOverheadLimit -Duser.country=US -Duser.language=en
+					</argLine>
+				</configuration>
+				<executions>
+					<execution>
+						<id>integration-tests</id>
+						<phase>integration-test</phase>
+						<goals>
+							<goal>test</goal>
+						</goals>
+						<configuration>
+							<includes>
+								<include>**/*ITCase.*</include>
+							</includes>
+							<!-- override reuseForks to true to reduce testing time -->
+							<reuseForks>true</reuseForks>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
 			<plugin>
 				<groupId>org.xolstice.maven.plugins</groupId>
 				<artifactId>protobuf-maven-plugin</artifactId>
@@ -297,6 +423,7 @@ under the License.
 								<include>**/testutils/**</include>
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
+								<include>docker/bootstrap.sh</include>
 							</includes>
 						</configuration>
 					</execution>
@@ -320,6 +447,7 @@ under the License.
 								<include>**/testutils/**</include>
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
+								<include>docker/bootstrap.sh</include>
 							</includes>
 						</configuration>
 					</execution>
