@@ -74,7 +74,8 @@ public class PulsarUnorderedSourceReader<OUT> extends PulsarSourceReaderBase<OUT
             @Nullable TransactionCoordinatorClient coordinatorClient) {
         super(
                 elementsQueue,
-                new PulsarUnorderedFetcherManager(elementsQueue, splitReaderSupplier::get),
+                new PulsarUnorderedFetcherManager(
+                        elementsQueue, splitReaderSupplier::get, context.getConfiguration()),
                 recordEmitter,
                 context,
                 sourceConfiguration,

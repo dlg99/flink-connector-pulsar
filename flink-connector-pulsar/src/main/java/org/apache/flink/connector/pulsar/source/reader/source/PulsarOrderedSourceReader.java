@@ -77,7 +77,8 @@ public class PulsarOrderedSourceReader<OUT> extends PulsarSourceReaderBase<OUT> 
             PulsarAdminRequest adminRequest) {
         super(
                 elementsQueue,
-                new PulsarOrderedFetcherManager(elementsQueue, splitReaderSupplier::get),
+                new PulsarOrderedFetcherManager(
+                        elementsQueue, splitReaderSupplier::get, context.getConfiguration()),
                 recordEmitter,
                 context,
                 sourceConfiguration,
