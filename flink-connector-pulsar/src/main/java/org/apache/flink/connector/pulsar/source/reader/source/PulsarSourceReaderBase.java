@@ -74,12 +74,6 @@ abstract class PulsarSourceReaderBase<OUT>
         return splitState.toPulsarPartitionSplit();
     }
 
-    protected void closeFinishedSplits(Set<String> finishedSplitIds) {
-        for (String splitId : finishedSplitIds) {
-            ((PulsarFetcherManagerBase) splitFetcherManager).closeFetcher(splitId);
-        }
-    }
-
     @Override
     public void pauseOrResumeSplits(
             Collection<String> splitsToPause, Collection<String> splitsToResume) {
@@ -94,5 +88,11 @@ abstract class PulsarSourceReaderBase<OUT>
         // Close shared pulsar resources.
         pulsarClient.shutdown();
         adminRequest.close();
+    }
+
+    protected void closeFinishedSplits(Set<String> finishedSplitIds) {
+        for (String splitId : finishedSplitIds) {
+            ((PulsarFetcherManagerBase) splitFetcherManager).closeFetcher(splitId);
+        }
     }
 }

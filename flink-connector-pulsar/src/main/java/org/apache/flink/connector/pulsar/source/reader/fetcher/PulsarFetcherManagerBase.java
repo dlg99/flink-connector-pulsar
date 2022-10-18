@@ -75,17 +75,23 @@ public abstract class PulsarFetcherManagerBase
         }
     }
 
-    /** Close the finished split related fetcher. */
-    public void closeFetcher(String splitId) {
-        SplitFetcher<Message<byte[]>, PulsarPartitionSplit> fetcher = getOrCreateFetcher(splitId);
-        fetcher.shutdown();
-    }
-
     @Override
     protected void startFetcher(SplitFetcher<Message<byte[]>, PulsarPartitionSplit> fetcher) {
         if (fetcherStatus.get(fetcher.fetcherId()) != Boolean.TRUE) {
             fetcherStatus.put(fetcher.fetcherId(), true);
             super.startFetcher(fetcher);
+        }
+    }
+
+    /** Close the finished split related fetcher. */
+    public void closeFetcher(String splitId) {
+        Integer fetchId = splitFetcherMapping.remove(splitId);
+        if (fetchId != null) {
+            fetcherStatus.remove(fetchId);
+            SplitFetcher<Message<byte[]>, PulsarPartitionSplit> fetcher = fetchers.remove(fetchId);
+            if (fetcher != null) {
+                fetcher.shutdown();
+            }
         }
     }
 
