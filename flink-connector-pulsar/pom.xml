@@ -221,6 +221,12 @@ under the License.
 			<version>${pulsar.version}</version>
 			<scope>test</scope>
 		</dependency>
+		<dependency>
+			<groupId>com.github.ben-manes.caffeine</groupId>
+			<artifactId>caffeine</artifactId>
+			<version>${pulsar-caffeine.version}</version>
+			<scope>test</scope>
+		</dependency>
 
 		<!-- Add Pulsar 2.x as a dependency. -->
 		<!-- Move this to button for avoiding class conflicts with pulsar-broker. -->

@@ -185,8 +185,8 @@ public final class PulsarSchemaUtils {
                 .name(schemaInfo.getName())
                 .schema(schemaInfo.getSchema())
                 .type(schemaInfo.getType())
-                .timestamp(schemaInfo.getTimestamp())
                 .properties(properties)
+                .timestamp(schemaInfo.getTimestamp())
                 .build();
     }
 
