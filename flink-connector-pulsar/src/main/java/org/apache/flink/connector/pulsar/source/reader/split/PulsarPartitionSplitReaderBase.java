@@ -97,7 +97,7 @@ abstract class PulsarPartitionSplitReaderBase
         String splitId = registeredSplit.splitId();
         Deadline deadline = Deadline.fromNow(sourceConfiguration.getMaxFetchTime());
 
-        // Consume messages from pulsar until it was waked up by flink reader.
+        // Consume messages from pulsar until it was woken up by flink reader.
         for (int messageNum = 0;
                 messageNum < sourceConfiguration.getMaxFetchRecords() && deadline.hasTimeLeft();
                 messageNum++) {
@@ -110,10 +110,9 @@ abstract class PulsarPartitionSplitReaderBase
                 StopCondition condition = stopCursor.shouldStop(message);
 
                 if (condition == StopCondition.CONTINUE || condition == StopCondition.EXACTLY) {
-                    // Deserialize message.
+                    // Collect original message.
                     builder.add(splitId, message);
-
-                    // Acknowledge message if needed.
+                    // Acknowledge the message if you need.
                     finishedPollMessage(message);
                 }
 

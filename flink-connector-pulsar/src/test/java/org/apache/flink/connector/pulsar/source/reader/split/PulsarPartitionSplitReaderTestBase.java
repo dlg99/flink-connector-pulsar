@@ -169,7 +169,7 @@ abstract class PulsarPartitionSplitReaderTestBase extends PulsarTestSuiteBase {
             boolean verify,
             Boundedness boundedness) {
         List<Message<byte[]>> messages = new ArrayList<>(expectedCount);
-        List finishedSplits = new ArrayList<>();
+        List<String> finishedSplits = new ArrayList<>();
         for (int i = 0; i < 3; ) {
             try {
                 RecordsWithSplitIds<Message<byte[]>> recordsBySplitIds = splitReader.fetch();

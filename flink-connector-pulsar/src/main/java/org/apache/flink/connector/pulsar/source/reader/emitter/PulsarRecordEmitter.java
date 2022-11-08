@@ -37,10 +37,11 @@ public class PulsarRecordEmitter<T>
         implements RecordEmitter<Message<byte[]>, T, PulsarPartitionSplitState> {
 
     private final PulsarDeserializationSchema<T> deserializationSchema;
-    private final SourceOutputWrapper<T> sourceOutputWrapper = new SourceOutputWrapper<>();
+    private final SourceOutputWrapper<T> sourceOutputWrapper;
 
     public PulsarRecordEmitter(PulsarDeserializationSchema<T> deserializationSchema) {
         this.deserializationSchema = deserializationSchema;
+        this.sourceOutputWrapper = new SourceOutputWrapper<>();
     }
 
     @Override
@@ -51,14 +52,16 @@ public class PulsarRecordEmitter<T>
         sourceOutputWrapper.setSourceOutput(output);
         sourceOutputWrapper.setTimestamp(element);
 
+        // Deserialize the message and since it to output.
         deserializationSchema.deserialize(element, sourceOutputWrapper);
         splitState.setLatestConsumedId(element.getMessageId());
 
-        // Recycle message.
+        // Release the messages if we use message pool in Pulsar.
         element.release();
     }
 
     private static class SourceOutputWrapper<T> implements Collector<T> {
+
         private SourceOutput<T> sourceOutput;
         private long timestamp;
 
