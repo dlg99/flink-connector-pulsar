@@ -36,10 +36,12 @@ import java.time.Duration;
 import java.util.Objects;
 
 import static org.apache.flink.connector.base.source.reader.SourceReaderOptions.ELEMENT_QUEUE_CAPACITY;
+import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ALLOW_KEY_SHARED_OUT_OF_ORDER_DELIVERY;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_AUTO_COMMIT_CURSOR_INTERVAL;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_DEFAULT_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_SOURCE_METRICS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_RECORDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_PARTITION_DISCOVERY_INTERVAL_MS;
@@ -69,6 +71,7 @@ public class SourceConfiguration extends PulsarConfiguration {
     private final SubscriptionType subscriptionType;
     private final SubscriptionMode subscriptionMode;
     private final boolean allowKeySharedOutOfOrderDelivery;
+    private final boolean enableMetrics;
 
     public SourceConfiguration(Configuration configuration) {
         super(configuration);
@@ -87,6 +90,8 @@ public class SourceConfiguration extends PulsarConfiguration {
         this.subscriptionType = get(PULSAR_SUBSCRIPTION_TYPE);
         this.subscriptionMode = get(PULSAR_SUBSCRIPTION_MODE);
         this.allowKeySharedOutOfOrderDelivery = get(PULSAR_ALLOW_KEY_SHARED_OUT_OF_ORDER_DELIVERY);
+        this.enableMetrics =
+                get(PULSAR_ENABLE_SOURCE_METRICS) && get(PULSAR_STATS_INTERVAL_SECONDS) > 0;
     }
 
     /** The capacity of the element queue in the source reader. */
@@ -215,6 +220,11 @@ public class SourceConfiguration extends PulsarConfiguration {
         return allowKeySharedOutOfOrderDelivery;
     }
 
+    /** Whether to expose the metrics from Pulsar Consumer. */
+    public boolean isEnableMetrics() {
+        return enableMetrics;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -238,7 +248,8 @@ public class SourceConfiguration extends PulsarConfiguration {
                 && Objects.equals(subscriptionName, that.subscriptionName)
                 && subscriptionType == that.subscriptionType
                 && subscriptionMode == that.subscriptionMode
-                && allowKeySharedOutOfOrderDelivery == that.allowKeySharedOutOfOrderDelivery;
+                && allowKeySharedOutOfOrderDelivery == that.allowKeySharedOutOfOrderDelivery
+                && enableMetrics == that.enableMetrics;
     }
 
     @Override
@@ -256,6 +267,7 @@ public class SourceConfiguration extends PulsarConfiguration {
                 subscriptionName,
                 subscriptionType,
                 subscriptionMode,
-                allowKeySharedOutOfOrderDelivery);
+                allowKeySharedOutOfOrderDelivery,
+                enableMetrics);
     }
 }

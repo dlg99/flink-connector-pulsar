@@ -20,8 +20,11 @@ package org.apache.flink.connector.pulsar.sink.writer.topic;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.connector.pulsar.common.metrics.ProducerMetricsInterceptor;
 import org.apache.flink.connector.pulsar.sink.committer.PulsarCommittable;
 import org.apache.flink.connector.pulsar.sink.config.SinkConfiguration;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.util.FlinkRuntimeException;
 
 import org.apache.flink.shaded.guava30.com.google.common.io.Closer;
@@ -29,6 +32,7 @@ import org.apache.flink.shaded.guava30.com.google.common.io.Closer;
 import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.ProducerBuilder;
+import org.apache.pulsar.client.api.ProducerStats;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
@@ -37,6 +41,7 @@ import org.apache.pulsar.client.api.transaction.TransactionCoordinatorClient;
 import org.apache.pulsar.client.api.transaction.TxnID;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.common.schema.SchemaInfo;
+import org.apache.pulsar.shade.com.google.common.base.Strings;
 
 import javax.annotation.Nullable;
 
@@ -47,8 +52,27 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.apache.flink.connector.pulsar.common.config.PulsarClientFactory.createClient;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.NUM_ACKS_RECEIVED;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.NUM_BYTES_SENT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.NUM_MSGS_SENT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.NUM_SEND_FAILED;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.PENDING_QUEUE_SIZE;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.PULSAR_PRODUCER_METRIC_NAME;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_BYTES_RATE;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_50_PCT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_75_PCT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_95_PCT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_999_PCT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_99_PCT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_LATENCY_MILLIS_MAX;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.SEND_MSGS_RATE;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.TOTAL_ACKS_RECEIVED;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.TOTAL_BYTES_SENT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.TOTAL_MSGS_SENT;
+import static org.apache.flink.connector.pulsar.common.metrics.MetricNames.TOTAL_SEND_FAILED;
 import static org.apache.flink.connector.pulsar.common.utils.PulsarExceptionUtils.sneakyClient;
 import static org.apache.flink.connector.pulsar.common.utils.PulsarTransactionUtils.createTransaction;
 import static org.apache.flink.connector.pulsar.sink.config.PulsarSinkConfigUtils.createProducerBuilder;
@@ -63,17 +87,25 @@ public class ProducerRegister implements Closeable {
 
     private final PulsarClient pulsarClient;
     private final SinkConfiguration sinkConfiguration;
+    private final SinkWriterMetricGroup metricGroup;
     @Nullable private final CryptoKeyReader cryptoKeyReader;
     private final Map<String, Map<SchemaInfo, Producer<?>>> register;
     private final Map<String, Transaction> transactionRegister;
 
     public ProducerRegister(
-            SinkConfiguration sinkConfiguration, @Nullable CryptoKeyReader cryptoKeyReader) {
+            SinkConfiguration sinkConfiguration,
+            @Nullable CryptoKeyReader cryptoKeyReader,
+            SinkWriterMetricGroup metricGroup) {
         this.pulsarClient = createClient(sinkConfiguration);
         this.sinkConfiguration = sinkConfiguration;
+        this.metricGroup = metricGroup;
         this.cryptoKeyReader = cryptoKeyReader;
         this.register = new HashMap<>();
         this.transactionRegister = new HashMap<>();
+
+        if (sinkConfiguration.isEnableMetrics()) {
+            metricGroup.setCurrentSendTimeGauge(this::currentSendTimeGauge);
+        }
     }
 
     /**
@@ -162,7 +194,13 @@ public class ProducerRegister implements Closeable {
 
             // Set the required topic name.
             builder.topic(topic);
+            // Set the sending counter for metrics.
+            builder.intercept(new ProducerMetricsInterceptor(metricGroup));
+
             Producer<T> producer = sneakyClient(builder::create);
+
+            // Expose the stats for calculating and monitoring.
+            exposeProducerMetrics(producer);
             producers.put(schemaInfo, producer);
 
             return producer;
@@ -210,5 +248,52 @@ public class ProducerRegister implements Closeable {
      */
     private void clearTransactions() {
         transactionRegister.clear();
+    }
+
+    private Long currentSendTimeGauge() {
+        double sendTime =
+                register.values().stream()
+                        .flatMap(v -> v.values().stream())
+                        .map(Producer::getStats)
+                        .mapToDouble(ProducerStats::getSendLatencyMillis50pct)
+                        .average()
+                        .orElse(Long.MAX_VALUE);
+
+        return Math.round(sendTime);
+    }
+
+    private void exposeProducerMetrics(Producer<?> producer) {
+        if (sinkConfiguration.isEnableMetrics()) {
+            String producerIdentity = producer.getProducerName();
+            if (Strings.isNullOrEmpty(producerIdentity)) {
+                // Fallback to use the topic name.
+                producerIdentity = UUID.randomUUID().toString();
+            }
+
+            MetricGroup group =
+                    metricGroup
+                            .addGroup(PULSAR_PRODUCER_METRIC_NAME)
+                            .addGroup(producer.getTopic())
+                            .addGroup(producerIdentity);
+            ProducerStats stats = producer.getStats();
+
+            group.gauge(NUM_MSGS_SENT, stats::getNumMsgsSent);
+            group.gauge(NUM_BYTES_SENT, stats::getNumBytesSent);
+            group.gauge(NUM_SEND_FAILED, stats::getNumSendFailed);
+            group.gauge(NUM_ACKS_RECEIVED, stats::getNumAcksReceived);
+            group.gauge(SEND_MSGS_RATE, stats::getSendMsgsRate);
+            group.gauge(SEND_BYTES_RATE, stats::getSendBytesRate);
+            group.gauge(SEND_LATENCY_MILLIS_50_PCT, stats::getSendLatencyMillis50pct);
+            group.gauge(SEND_LATENCY_MILLIS_75_PCT, stats::getSendLatencyMillis75pct);
+            group.gauge(SEND_LATENCY_MILLIS_95_PCT, stats::getSendLatencyMillis95pct);
+            group.gauge(SEND_LATENCY_MILLIS_99_PCT, stats::getSendLatencyMillis99pct);
+            group.gauge(SEND_LATENCY_MILLIS_999_PCT, stats::getSendLatencyMillis999pct);
+            group.gauge(SEND_LATENCY_MILLIS_MAX, stats::getSendLatencyMillisMax);
+            group.gauge(TOTAL_MSGS_SENT, stats::getTotalMsgsSent);
+            group.gauge(TOTAL_BYTES_SENT, stats::getTotalBytesSent);
+            group.gauge(TOTAL_SEND_FAILED, stats::getTotalSendFailed);
+            group.gauge(TOTAL_ACKS_RECEIVED, stats::getTotalAcksReceived);
+            group.gauge(PENDING_QUEUE_SIZE, stats::getPendingQueueSize);
+        }
     }
 }

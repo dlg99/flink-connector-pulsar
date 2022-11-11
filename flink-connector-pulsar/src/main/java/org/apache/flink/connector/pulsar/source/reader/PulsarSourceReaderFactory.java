@@ -105,7 +105,8 @@ public final class PulsarSourceReaderFactory {
                                     adminRequest,
                                     sourceConfiguration,
                                     schema,
-                                    cryptoKeyReader);
+                                    cryptoKeyReader,
+                                    readerContext.metricGroup());
 
             return new PulsarOrderedSourceReader<>(
                     elementsQueue,
@@ -132,6 +133,7 @@ public final class PulsarSourceReaderFactory {
                                     sourceConfiguration,
                                     schema,
                                     cryptoKeyReader,
+                                    readerContext.metricGroup(),
                                     coordinatorClient);
 
             return new PulsarUnorderedSourceReader<>(

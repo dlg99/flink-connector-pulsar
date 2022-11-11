@@ -31,7 +31,9 @@ import org.apache.pulsar.client.api.Schema;
 
 import java.util.Objects;
 
+import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_MAX_MESSAGES;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_ENABLE_SINK_METRICS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_MAX_RECOMMIT_TIMES;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_MESSAGE_KEY_HASH;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS;
@@ -55,6 +57,7 @@ public class SinkConfiguration extends PulsarConfiguration {
     private final int maxRecommitTimes;
     private final boolean enableTopicAutoCreation;
     private final int defaultTopicPartitions;
+    private final boolean enableMetrics;
 
     public SinkConfiguration(Configuration configuration) {
         super(configuration);
@@ -68,6 +71,8 @@ public class SinkConfiguration extends PulsarConfiguration {
         this.maxRecommitTimes = get(PULSAR_MAX_RECOMMIT_TIMES);
         this.enableTopicAutoCreation = get(PULSAR_SINK_TOPIC_AUTO_CREATION);
         this.defaultTopicPartitions = get(PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS);
+        this.enableMetrics =
+                get(PULSAR_ENABLE_SINK_METRICS) && get(PULSAR_STATS_INTERVAL_SECONDS) > 0;
     }
 
     /** The delivery guarantee changes the behavior of {@link PulsarWriter}. */
@@ -129,6 +134,11 @@ public class SinkConfiguration extends PulsarConfiguration {
         return defaultTopicPartitions;
     }
 
+    /** Whether to expose the metrics from Pulsar Producer. */
+    public boolean isEnableMetrics() {
+        return enableMetrics;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -149,7 +159,8 @@ public class SinkConfiguration extends PulsarConfiguration {
                 && enableSchemaEvolution == that.enableSchemaEvolution
                 && maxRecommitTimes == that.maxRecommitTimes
                 && enableTopicAutoCreation == that.enableTopicAutoCreation
-                && defaultTopicPartitions == that.defaultTopicPartitions;
+                && defaultTopicPartitions == that.defaultTopicPartitions
+                && enableMetrics == that.enableMetrics;
     }
 
     @Override
@@ -164,6 +175,7 @@ public class SinkConfiguration extends PulsarConfiguration {
                 enableSchemaEvolution,
                 maxRecommitTimes,
                 enableTopicAutoCreation,
-                defaultTopicPartitions);
+                defaultTopicPartitions,
+                enableMetrics);
     }
 }

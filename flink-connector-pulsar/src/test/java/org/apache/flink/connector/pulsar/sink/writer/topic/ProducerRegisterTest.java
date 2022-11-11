@@ -35,6 +35,7 @@ import java.util.List;
 
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
 import static org.apache.flink.connector.base.DeliveryGuarantee.EXACTLY_ONCE;
+import static org.apache.flink.metrics.groups.UnregisteredMetricsGroup.createSinkWriterMetricGroup;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -49,7 +50,8 @@ class ProducerRegisterTest extends PulsarTestSuiteBase {
         operator().createTopic(topic, 8);
 
         SinkConfiguration configuration = sinkConfiguration(deliveryGuarantee);
-        ProducerRegister register = new ProducerRegister(configuration, null);
+        ProducerRegister register =
+                new ProducerRegister(configuration, null, createSinkWriterMetricGroup());
 
         String message = randomAlphabetic(10);
         register.createMessageBuilder(topic, Schema.STRING).value(message).send();
@@ -76,7 +78,8 @@ class ProducerRegisterTest extends PulsarTestSuiteBase {
         operator().createTopic(topic, 8);
 
         SinkConfiguration configuration = sinkConfiguration(deliveryGuarantee);
-        ProducerRegister register = new ProducerRegister(configuration, null);
+        ProducerRegister register =
+                new ProducerRegister(configuration, null, createSinkWriterMetricGroup());
 
         String message = randomAlphabetic(10);
         register.createMessageBuilder(topic, Schema.STRING).value(message).sendAsync();

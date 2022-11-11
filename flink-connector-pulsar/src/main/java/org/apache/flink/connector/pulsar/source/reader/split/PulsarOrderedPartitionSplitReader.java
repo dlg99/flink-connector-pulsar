@@ -24,6 +24,7 @@ import org.apache.flink.connector.pulsar.source.config.SourceConfiguration;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
 import org.apache.flink.connector.pulsar.source.reader.source.PulsarOrderedSourceReader;
 import org.apache.flink.connector.pulsar.source.split.PulsarPartitionSplit;
+import org.apache.flink.metrics.groups.SourceReaderMetricGroup;
 
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.CryptoKeyReader;
@@ -58,8 +59,15 @@ public class PulsarOrderedPartitionSplitReader extends PulsarPartitionSplitReade
             PulsarAdminRequest adminRequest,
             SourceConfiguration sourceConfiguration,
             Schema<byte[]> schema,
-            @Nullable CryptoKeyReader cryptoKeyReader) {
-        super(pulsarClient, adminRequest, sourceConfiguration, schema, cryptoKeyReader);
+            @Nullable CryptoKeyReader cryptoKeyReader,
+            SourceReaderMetricGroup metricGroup) {
+        super(
+                pulsarClient,
+                adminRequest,
+                sourceConfiguration,
+                schema,
+                cryptoKeyReader,
+                metricGroup);
     }
 
     @Override
