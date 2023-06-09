@@ -32,13 +32,14 @@ import org.apache.pulsar.client.api.CompressionType;
 import org.apache.pulsar.client.api.ProducerCryptoFailureAction;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import static java.util.Collections.emptyMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.flink.configuration.description.LinkElement.link;
 import static org.apache.flink.configuration.description.TextElement.code;
-import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
+import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_MEMORY_LIMIT_BYTES;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PRODUCER_CONFIG_PREFIX;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.SINK_CONFIG_PREFIX;
 import static org.apache.flink.connector.pulsar.sink.writer.router.MessageKeyHash.MURMUR3_32_HASH;
@@ -88,7 +89,7 @@ public final class PulsarSinkOptions {
                     .withDescription(
                             Description.builder()
                                     .text(
-                                            "This option is used when the user require the %s semantic. ",
+                                            "This option is used when the user require the %s semantic.",
                                             code("DeliveryGuarantee.EXACTLY_ONCE"))
                                     .text(
                                             "We would use transaction for making sure the message could be write only once.")
@@ -115,10 +116,8 @@ public final class PulsarSinkOptions {
                     .withDescription(
                             Description.builder()
                                     .text(
-                                            "If you enable this option and use %s,"
-                                                    + " we would produce and serialize the message by using Pulsar's %s.",
-                                            code(
-                                                    "PulsarSinkBuilder.setSerializationSchema(Schema)"),
+                                            "If you enable this option and use PulsarSerializationSchema.pulsarSchema(),"
+                                                    + " we would consume and deserialize the message by using Pulsar's %s.",
                                             code("Schema"))
                                     .build());
 
@@ -130,30 +129,19 @@ public final class PulsarSinkOptions {
                             "The allowed transaction recommit times if we meet some retryable exception."
                                     + " This is used in Pulsar Transaction.");
 
-    public static final ConfigOption<Boolean> PULSAR_ENABLE_SINK_METRICS =
-            ConfigOptions.key(SINK_CONFIG_PREFIX + "enableMetrics")
-                    .booleanType()
-                    .defaultValue(true)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "The metrics from Pulsar Producer are only exposed if you enable this option. ")
-                                    .text(
-                                            "You should set the %s to a positive value if you enable this option.",
-                                            code(PULSAR_STATS_INTERVAL_SECONDS.key()))
-                                    .build());
-
-    public static final ConfigOption<Boolean> PULSAR_VALIDATE_SINK_MESSAGE_BYTES =
-            ConfigOptions.key(SINK_CONFIG_PREFIX + "validateSinkMessageBytes")
+    public static final ConfigOption<Boolean> PULSAR_SINK_TOPIC_AUTO_CREATION =
+            ConfigOptions.key(SINK_CONFIG_PREFIX + "topicAutoCreation")
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "Pulsar client can validate the raw message bytes with the latest topic schema. ")
-                                    .text(
-                                            "This can make sure your serialized messages bytes is valid for consumer.")
-                                    .build());
+                            "Enable the topic auto creation if the topic doesn't exist in Pulsar.");
+
+    public static final ConfigOption<Integer> PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS =
+            ConfigOptions.key(SINK_CONFIG_PREFIX + "defaultTopicPartitions")
+                    .intType()
+                    .defaultValue(4)
+                    .withDescription(
+                            "If you enable the topic auto creation, you should also configure the default partition number here");
 
     ///////////////////////////////////////////////////////////////////////////////
     //
@@ -221,29 +209,7 @@ public final class PulsarSinkOptions {
             ConfigOptions.key(PRODUCER_CONFIG_PREFIX + "chunkingEnabled")
                     .booleanType()
                     .defaultValue(false)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "If message size is higher than allowed max publish-payload size by broker,")
-                                    .text(
-                                            " then enableChunking helps producer to split message into multiple chunks")
-                                    .text(" and publish them to broker separately and in order.")
-                                    .text(
-                                            " So, it allows client to successfully publish large size of messages in pulsar.")
-                                    .build());
-
-    public static final ConfigOption<Integer> PULSAR_CHUNK_MAX_MESSAGE_SIZE =
-            ConfigOptions.key(PRODUCER_CONFIG_PREFIX + "chunkMaxMessageSize")
-                    .intType()
-                    .defaultValue(-1)
-                    .withDescription(
-                            Description.builder()
-                                    .text("Max chunk message size in bytes.")
-                                    .text(
-                                            " Producer chunks the message if chunking is enabled and message size is larger than max chunk-message size.")
-                                    .text(
-                                            " By default, chunkMaxMessageSize value is -1 and producer chunks based on max-message size configured at the broker.")
-                                    .build());
+                    .withDescription("");
 
     public static final ConfigOption<CompressionType> PULSAR_COMPRESSION_TYPE =
             ConfigOptions.key(PRODUCER_CONFIG_PREFIX + "compressionType")
@@ -254,10 +220,10 @@ public final class PulsarSinkOptions {
                                     .text("Message data compression type used by a producer.")
                                     .text("Available options:")
                                     .list(
-                                            link("https://github.com/lz4/lz4", "LZ4"),
-                                            link("https://zlib.net/", "ZLIB"),
-                                            link("https://facebook.github.io/zstd/", "ZSTD"),
-                                            link("https://google.github.io/snappy/", "SNAPPY"))
+                                            link("LZ4", "https://github.com/lz4/lz4"),
+                                            link("ZLIB", "https://zlib.net/"),
+                                            link("ZSTD", "https://facebook.github.io/zstd/"),
+                                            link("SNAPPY", "https://google.github.io/snappy/"))
                                     .build());
 
     public static final ConfigOption<Long> PULSAR_INITIAL_SEQUENCE_ID =
@@ -288,4 +254,12 @@ public final class PulsarSinkOptions {
                             .defaultValue(ProducerCryptoFailureAction.FAIL)
                             .withDescription(
                                     "The action the producer will take in case of encryption failures.");
+
+    public static final ConfigOption<List<String>> PULSAR_ENCRYPTION_KEYS =
+            ConfigOptions.key(PRODUCER_CONFIG_PREFIX + "encryptionKeys")
+                    .stringType()
+                    .asList()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Add public encryption key, used by producer to encrypt the data key.");
 }

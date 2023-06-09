@@ -18,117 +18,93 @@
 
 package org.apache.flink.connector.pulsar.source.enumerator.subscriber.impl;
 
+import org.apache.flink.connector.pulsar.common.request.PulsarAdminRequest;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator.KeySharedMode;
 
-import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.RegexSubscriptionMode;
-import org.apache.pulsar.client.impl.LookupService;
-import org.apache.pulsar.client.impl.PulsarClientImpl;
-import org.apache.pulsar.common.api.proto.CommandGetTopicsOfNamespace.Mode;
-import org.apache.pulsar.common.lookup.GetTopicsResult;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.topics.TopicList;
 
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
 
-import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.isInternal;
-import static org.apache.flink.util.Preconditions.checkNotNull;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.flink.shaded.guava30.com.google.common.base.Predicates.not;
 
-/** Subscribe to matching topics based on the topic pattern. */
+/** Subscribe to matching topics based on topic pattern. */
 public class TopicPatternSubscriber extends BasePulsarSubscriber {
     private static final long serialVersionUID = 3307710093243745104L;
 
-    private final Pattern shortenedPattern;
+    private final Pattern topicPattern;
+    private final RegexSubscriptionMode subscriptionMode;
     private final String namespace;
-    private final Mode subscriptionMode;
 
     public TopicPatternSubscriber(Pattern topicPattern, RegexSubscriptionMode subscriptionMode) {
-        TopicName destination = TopicName.get(topicPattern.pattern());
-        String pattern = destination.toString();
+        this.topicPattern = topicPattern;
+        this.subscriptionMode = subscriptionMode;
 
-        this.shortenedPattern = Pattern.compile(pattern.split("://")[1]);
-        this.namespace = destination.getNamespaceObject().toString();
-        this.subscriptionMode = convertRegexSubscriptionMode(subscriptionMode);
+        // Extract the namespace from topic pattern regex.
+        // If no namespace provided in the regex, we would directly use "default" as the namespace.
+        TopicName destination = TopicName.get(topicPattern.toString());
+        NamespaceName namespaceName = destination.getNamespaceObject();
+        this.namespace = namespaceName.toString();
     }
 
     @Override
     public Set<TopicPartition> getSubscribedTopicPartitions(
-            RangeGenerator generator, int parallelism) throws Exception {
-        Set<String> topics = queryTopicsByInternalProtocols();
-        return createTopicPartitions(topics, generator, parallelism);
-    }
-
-    /**
-     * We reuse this internal protocol in the Pulsar client for achieving the same behavior as
-     * directly using the client to consume the topic pattern.
-     */
-    private Set<String> queryTopicsByInternalProtocols() throws PulsarClientException {
-        checkNotNull(client, "This subscriber doesn't initialize properly.");
-
-        LookupService lookupService = ((PulsarClientImpl) client).getLookup();
-        NamespaceName namespaceName = NamespaceName.get(namespace);
+            PulsarAdminRequest adminRequest, RangeGenerator rangeGenerator, int parallelism) {
         try {
-            // Pulsar 2.11.0 can filter regular expression on broker, but it has a bug which can
-            // only be used for wildcard filtering.
-            String queryPattern = shortenedPattern.toString();
-            if (!queryPattern.endsWith(".*")) {
-                queryPattern = null;
+            return adminRequest
+                    .getTopics(namespace)
+                    .parallelStream()
+                    .filter(this::matchesSubscriptionMode)
+                    .filter(not(TopicNameUtils::isInternal))
+                    .filter(topic -> topicPattern.matcher(topic).find())
+                    .map(topic -> queryTopicMetadata(adminRequest, topic))
+                    .filter(Objects::nonNull)
+                    .flatMap(
+                            metadata -> {
+                                List<TopicRange> ranges =
+                                        rangeGenerator.range(metadata, parallelism);
+                                RangeGenerator.KeySharedMode mode =
+                                        rangeGenerator.keyShareMode(metadata, parallelism);
+                                return toTopicPartitions(metadata, ranges, mode).stream();
+                            })
+                    .collect(toSet());
+        } catch (PulsarAdminException e) {
+            if (e.getStatusCode() == 404) {
+                // Skip the topic metadata query.
+                return Collections.emptySet();
+            } else {
+                // This method would cause failure for subscribers.
+                throw new IllegalStateException(e);
             }
-
-            GetTopicsResult topicsResult =
-                    lookupService
-                            .getTopicsUnderNamespace(
-                                    namespaceName, subscriptionMode, queryPattern, null)
-                            .get();
-            List<String> topics = topicsResult.getTopics();
-            Set<String> results = new HashSet<>(topics.size());
-
-            // The regular expression filter may not be enabled in broker.
-            // Add the filter here if the result is not filtered.
-            for (String topic : topics) {
-                if (!isInternal(topic)
-                        && (topicsResult.isFiltered() || matchesTopicPattern(topic))) {
-                    results.add(topic);
-                }
-            }
-
-            return results;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarClientException(e);
-        } catch (ExecutionException e) {
-            throw PulsarClientException.unwrap(e);
         }
     }
 
     /**
-     * If the topic matches 'topicsPattern'. This method is in the PulsarClient, and it's removed
-     * since 2.11.0 release. We keep the method here. It's copied from {@link
-     * TopicList#filterTopics(List, String)}.
+     * Filter the topic by regex subscription mode. This logic is the same as pulsar consumer's
+     * regex subscription.
      */
-    private boolean matchesTopicPattern(String topic) {
-        String shortenedTopic = topic.split("://")[1];
-        return shortenedPattern.matcher(shortenedTopic).matches();
-    }
-
-    /** Convert the subscription mode into the internal binary protocol. */
-    private Mode convertRegexSubscriptionMode(RegexSubscriptionMode subscriptionMode) {
+    private boolean matchesSubscriptionMode(String topic) {
+        TopicName topicName = TopicName.get(topic);
+        // Filter the topic persistence.
         switch (subscriptionMode) {
-            case AllTopics:
-                return Mode.ALL;
             case PersistentOnly:
-                return Mode.PERSISTENT;
+                return topicName.isPersistent();
             case NonPersistentOnly:
-                return Mode.NON_PERSISTENT;
+                return !topicName.isPersistent();
             default:
-                throw new IllegalArgumentException(
-                        "We don't support such subscription mode " + subscriptionMode);
+                // RegexSubscriptionMode.AllTopics
+                return true;
         }
     }
 }

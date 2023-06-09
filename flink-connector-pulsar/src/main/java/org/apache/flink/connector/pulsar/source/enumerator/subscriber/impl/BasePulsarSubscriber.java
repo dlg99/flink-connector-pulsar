@@ -18,84 +18,66 @@
 
 package org.apache.flink.connector.pulsar.source.enumerator.subscriber.impl;
 
+import org.apache.flink.connector.pulsar.common.request.PulsarAdminRequest;
 import org.apache.flink.connector.pulsar.source.enumerator.subscriber.PulsarSubscriber;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicMetadata;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange;
-import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator.KeySharedMode;
 
-import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
-import org.apache.pulsar.client.api.PulsarClient;
-import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 
-import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
-import static org.apache.pulsar.common.partition.PartitionedTopicMetadata.NON_PARTITIONED;
+import static java.util.Collections.singletonList;
+import static org.apache.flink.connector.pulsar.common.utils.PulsarExceptionUtils.sneakyThrow;
 
 /** PulsarSubscriber abstract class to simplify Pulsar admin related operations. */
 public abstract class BasePulsarSubscriber implements PulsarSubscriber {
     private static final long serialVersionUID = 2053021503331058888L;
 
-    // Pulsar doesn't allow converting a non-partitioned topic into a partitioned topic.
-    // So we can just cache all the non-partitioned topics here for speeding up the query time.
-    private static final Set<String> NON_PARTITIONED_TOPICS = ConcurrentHashMap.newKeySet();
-
-    protected transient PulsarClient client;
-    protected transient PulsarAdmin admin;
-
-    protected TopicMetadata queryTopicMetadata(String topic) throws PulsarAdminException {
-        if (NON_PARTITIONED_TOPICS.contains(topic)) {
-            return new TopicMetadata(topic, NON_PARTITIONED);
-        }
-
+    protected TopicMetadata queryTopicMetadata(PulsarAdminRequest adminRequest, String topicName) {
         try {
-            PartitionedTopicMetadata metadata = admin.topics().getPartitionedTopicMetadata(topic);
-            if (metadata.partitions == NON_PARTITIONED) {
-                NON_PARTITIONED_TOPICS.add(topic);
-            }
-            return new TopicMetadata(topic, metadata.partitions);
+            return adminRequest.getTopicMetadata(topicName);
+        } catch (PulsarAdminException.NotFoundException e) {
+            return null;
         } catch (PulsarAdminException e) {
-            if (e.getStatusCode() == 404) {
-                // Return null for skipping the topic metadata query.
-                return null;
-            } else {
-                // This method would cause failure for subscribers.
-                throw e;
-            }
+            sneakyThrow(e);
+            return null;
         }
     }
 
-    protected Set<TopicPartition> createTopicPartitions(
-            Set<String> topics, RangeGenerator generator, int parallelism)
-            throws PulsarAdminException {
-        Set<TopicPartition> results = new HashSet<>();
+    protected List<TopicPartition> toTopicPartitions(
+            TopicMetadata metadata, List<TopicRange> ranges, KeySharedMode mode) {
+        if (!metadata.isPartitioned()) {
+            // For non-partitioned topic.
+            return toTopicPartitions(metadata.getName(), -1, ranges, mode);
+        } else {
+            // For partitioned topic.
+            List<TopicPartition> partitions = new ArrayList<>();
+            for (int i = 0; i < metadata.getPartitionSize(); i++) {
+                partitions.addAll(toTopicPartitions(metadata.getName(), i, ranges, mode));
+            }
+            return partitions;
+        }
+    }
 
-        for (String topic : topics) {
-            TopicMetadata metadata = queryTopicMetadata(topic);
-            if (metadata != null) {
-                List<TopicRange> ranges = generator.range(metadata, parallelism);
-                if (!metadata.isPartitioned()) {
-                    // For non-partitioned topic.
-                    results.add(new TopicPartition(metadata.getName(), ranges));
-                } else {
-                    // For partitioned topic.
-                    for (int i = 0; i < metadata.getPartitionSize(); i++) {
-                        results.add(new TopicPartition(metadata.getName(), i, ranges));
-                    }
+    protected List<TopicPartition> toTopicPartitions(
+            String topic, int partitionId, List<TopicRange> ranges, KeySharedMode mode) {
+        switch (mode) {
+            case JOIN:
+                return singletonList(new TopicPartition(topic, partitionId, ranges, mode));
+            case SPLIT:
+                List<TopicPartition> partitions = new ArrayList<>(ranges.size());
+                for (TopicRange range : ranges) {
+                    TopicPartition partition =
+                            new TopicPartition(topic, partitionId, singletonList(range), mode);
+                    partitions.add(partition);
                 }
-            }
+                return partitions;
+            default:
+                throw new UnsupportedOperationException(mode + " isn't supported.");
         }
-
-        return results;
-    }
-
-    @Override
-    public void open(PulsarClient client, PulsarAdmin admin) {
-        this.client = client;
-        this.admin = admin;
     }
 }

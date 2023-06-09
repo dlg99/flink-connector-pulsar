@@ -28,7 +28,6 @@ import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
-import org.apache.flink.connector.pulsar.common.crypto.PulsarCrypto;
 import org.apache.flink.connector.pulsar.source.config.SourceConfiguration;
 import org.apache.flink.connector.pulsar.source.enumerator.PulsarSourceEnumState;
 import org.apache.flink.connector.pulsar.source.enumerator.PulsarSourceEnumStateSerializer;
@@ -37,13 +36,16 @@ import org.apache.flink.connector.pulsar.source.enumerator.cursor.StartCursor;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StopCursor;
 import org.apache.flink.connector.pulsar.source.enumerator.subscriber.PulsarSubscriber;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator;
-import org.apache.flink.connector.pulsar.source.reader.PulsarSourceReader;
+import org.apache.flink.connector.pulsar.source.reader.PulsarSourceReaderFactory;
 import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema;
+import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchemaInitializationContext;
 import org.apache.flink.connector.pulsar.source.split.PulsarPartitionSplit;
 import org.apache.flink.connector.pulsar.source.split.PulsarPartitionSplitSerializer;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
 
-import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.CryptoKeyReader;
+
+import javax.annotation.Nullable;
 
 /**
  * The Source implementation of Pulsar. Please use a {@link PulsarSourceBuilder} to construct a
@@ -57,7 +59,7 @@ import org.apache.pulsar.client.api.PulsarClientException;
  *     .setServiceUrl(getServiceUrl())
  *     .setAdminUrl(getAdminUrl())
  *     .setSubscriptionName("test")
- *     .setDeserializationSchema(new SimpleStringSchema())
+ *     .setDeserializationSchema(PulsarDeserializationSchema.flinkSchema(new SimpleStringSchema()))
  *     .setBounded(StopCursor::defaultStopCursor)
  *     .build();
  * }</pre>
@@ -88,16 +90,17 @@ public final class PulsarSource<OUT>
 
     private final Boundedness boundedness;
 
-    /** The pulsar deserialization schema is used for deserializing message. */
+    /** The pulsar deserialization schema used for deserializing message. */
     private final PulsarDeserializationSchema<OUT> deserializationSchema;
 
-    private final PulsarCrypto pulsarCrypto;
+    @Nullable private final CryptoKeyReader cryptoKeyReader;
 
     /**
      * The constructor for PulsarSource, it's package protected for forcing using {@link
      * PulsarSourceBuilder}.
      */
-    PulsarSource(
+    @SuppressWarnings("java:S107")
+    public PulsarSource(
             SourceConfiguration sourceConfiguration,
             PulsarSubscriber subscriber,
             RangeGenerator rangeGenerator,
@@ -105,7 +108,7 @@ public final class PulsarSource<OUT>
             StopCursor stopCursor,
             Boundedness boundedness,
             PulsarDeserializationSchema<OUT> deserializationSchema,
-            PulsarCrypto pulsarCrypto) {
+            @Nullable CryptoKeyReader cryptoKeyReader) {
         this.sourceConfiguration = sourceConfiguration;
         this.subscriber = subscriber;
         this.rangeGenerator = rangeGenerator;
@@ -113,7 +116,7 @@ public final class PulsarSource<OUT>
         this.stopCursor = stopCursor;
         this.boundedness = boundedness;
         this.deserializationSchema = deserializationSchema;
-        this.pulsarCrypto = pulsarCrypto;
+        this.cryptoKeyReader = cryptoKeyReader;
     }
 
     /**
@@ -134,14 +137,19 @@ public final class PulsarSource<OUT>
     @Override
     public SourceReader<OUT, PulsarPartitionSplit> createReader(SourceReaderContext readerContext)
             throws Exception {
-        return PulsarSourceReader.create(
-                sourceConfiguration, deserializationSchema, pulsarCrypto, readerContext);
+        // Initialize the deserialization schema before creating the pulsar reader.
+        PulsarDeserializationSchemaInitializationContext initializationContext =
+                new PulsarDeserializationSchemaInitializationContext(readerContext);
+        deserializationSchema.open(initializationContext, sourceConfiguration);
+
+        return PulsarSourceReaderFactory.create(
+                readerContext, deserializationSchema, sourceConfiguration, cryptoKeyReader);
     }
 
     @Internal
     @Override
     public SplitEnumerator<PulsarPartitionSplit, PulsarSourceEnumState> createEnumerator(
-            SplitEnumeratorContext<PulsarPartitionSplit> enumContext) throws PulsarClientException {
+            SplitEnumeratorContext<PulsarPartitionSplit> enumContext) {
         return new PulsarSourceEnumerator(
                 subscriber,
                 startCursor,
@@ -155,8 +163,7 @@ public final class PulsarSource<OUT>
     @Override
     public SplitEnumerator<PulsarPartitionSplit, PulsarSourceEnumState> restoreEnumerator(
             SplitEnumeratorContext<PulsarPartitionSplit> enumContext,
-            PulsarSourceEnumState checkpoint)
-            throws PulsarClientException {
+            PulsarSourceEnumState checkpoint) {
         return new PulsarSourceEnumerator(
                 subscriber,
                 startCursor,

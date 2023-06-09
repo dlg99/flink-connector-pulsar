@@ -22,9 +22,12 @@ import org.apache.flink.connector.pulsar.source.enumerator.cursor.StopCursor;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
 
 import org.apache.pulsar.client.admin.PulsarAdmin;
-import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
+
+import java.util.Objects;
+
+import static org.apache.flink.connector.pulsar.common.utils.PulsarExceptionUtils.sneakyAdmin;
 
 /**
  * A stop cursor that initialize the position to the latest message id. The offsets initialization
@@ -48,10 +51,27 @@ public class LatestMessageStopCursor implements StopCursor {
     }
 
     @Override
-    public void open(PulsarAdmin admin, TopicPartition partition) throws PulsarAdminException {
+    public void open(PulsarAdmin admin, TopicPartition partition) {
         if (messageId == null) {
             String topic = partition.getFullTopicName();
-            this.messageId = admin.topics().getLastMessageId(topic);
+            this.messageId = sneakyAdmin(() -> admin.topics().getLastMessageId(topic));
         }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        LatestMessageStopCursor that = (LatestMessageStopCursor) o;
+        return inclusive == that.inclusive && Objects.equals(messageId, that.messageId);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(messageId, inclusive);
     }
 }

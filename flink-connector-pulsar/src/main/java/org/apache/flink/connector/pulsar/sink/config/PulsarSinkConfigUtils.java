@@ -34,6 +34,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_ADMIN_URL;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PARAMS;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PARAM_MAP;
+import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_MEMORY_LIMIT_BYTES;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_SERVICE_URL;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_ENABLED;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_MAX_BYTES;
@@ -41,8 +42,8 @@ import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BA
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_MAX_PUBLISH_DELAY_MICROS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_PARTITION_SWITCH_FREQUENCY_BY_PUBLISH_DELAY;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_CHUNKING_ENABLED;
-import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_CHUNK_MAX_MESSAGE_SIZE;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_COMPRESSION_TYPE;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_ENCRYPTION_KEYS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_INITIAL_SEQUENCE_ID;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_PRODUCER_CRYPTO_FAILURE_ACTION;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_PRODUCER_NAME;
@@ -51,12 +52,12 @@ import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SE
 import static org.apache.pulsar.client.api.MessageRoutingMode.SinglePartition;
 import static org.apache.pulsar.client.api.ProducerAccessMode.Shared;
 
-/** Create the {@link Producer} to send messages and a validator for building sink config. */
+/** Create the {@link Producer} to send message and a validator for building sink config. */
 @Internal
 public final class PulsarSinkConfigUtils {
 
     private PulsarSinkConfigUtils() {
-        // No need to create the instance.
+        // No need to create instance.
     }
 
     public static final PulsarConfigValidator SINK_CONFIG_VALIDATOR =
@@ -64,6 +65,10 @@ public final class PulsarSinkConfigUtils {
                     .requiredOption(PULSAR_SERVICE_URL)
                     .requiredOption(PULSAR_ADMIN_URL)
                     .conflictOptions(PULSAR_AUTH_PARAMS, PULSAR_AUTH_PARAM_MAP)
+                    .conflictOptions(PULSAR_MEMORY_LIMIT_BYTES, PULSAR_MAX_PENDING_MESSAGES)
+                    .conflictOptions(
+                            PULSAR_MEMORY_LIMIT_BYTES,
+                            PULSAR_MAX_PENDING_MESSAGES_ACROSS_PARTITIONS)
                     .build();
 
     /** Create a pulsar producer builder by using the given Configuration. */
@@ -89,13 +94,19 @@ public final class PulsarSinkConfigUtils {
         configuration.useOption(PULSAR_BATCHING_MAX_BYTES, builder::batchingMaxBytes);
         configuration.useOption(PULSAR_BATCHING_ENABLED, builder::enableBatching);
         configuration.useOption(PULSAR_CHUNKING_ENABLED, builder::enableChunking);
-        configuration.useOption(PULSAR_CHUNK_MAX_MESSAGE_SIZE, builder::chunkMaxMessageSize);
         configuration.useOption(PULSAR_COMPRESSION_TYPE, builder::compressionType);
         configuration.useOption(PULSAR_INITIAL_SEQUENCE_ID, builder::initialSequenceId);
         configuration.useOption(
                 PULSAR_PRODUCER_CRYPTO_FAILURE_ACTION, builder::cryptoFailureAction);
 
-        // Set producer properties
+        // Create the encryption keys.
+        if (configuration.contains(PULSAR_ENCRYPTION_KEYS)) {
+            for (String key : configuration.get(PULSAR_ENCRYPTION_KEYS)) {
+                builder.addEncryptionKey(key);
+            }
+        }
+
+        // Set producer properties.
         Map<String, String> properties = configuration.getProperties(PULSAR_PRODUCER_PROPERTIES);
         if (!properties.isEmpty()) {
             builder.properties(properties);

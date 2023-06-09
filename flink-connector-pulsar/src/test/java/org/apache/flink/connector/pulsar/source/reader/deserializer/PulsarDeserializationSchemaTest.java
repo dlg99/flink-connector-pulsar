@@ -21,14 +21,12 @@ package org.apache.flink.connector.pulsar.source.reader.deserializer;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.pulsar.SampleMessage.TestMessage;
 import org.apache.flink.connector.pulsar.source.PulsarSource;
 import org.apache.flink.connector.pulsar.source.PulsarSourceOptions;
 import org.apache.flink.connector.pulsar.source.config.SourceConfiguration;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StopCursor;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema.PulsarInitializationContext;
 import org.apache.flink.connector.pulsar.testutils.PulsarTestSuiteBase;
 import org.apache.flink.connector.testutils.source.deserialization.TestingDeserializationContext;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -40,7 +38,6 @@ import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.function.FunctionWithException;
 
 import org.apache.pulsar.client.api.Message;
-import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
@@ -53,39 +50,42 @@ import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
-import static org.apache.commons.lang3.RandomStringUtils.randomAlphanumeric;
+import static org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema.flinkSchema;
+import static org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema.flinkTypeInfo;
+import static org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema.pulsarSchema;
 import static org.apache.flink.util.Preconditions.checkState;
 import static org.apache.pulsar.client.api.Schema.PROTOBUF_NATIVE;
+import static org.apache.pulsar.client.api.SubscriptionType.Exclusive;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.mockito.Mockito.mock;
 
 /** Unit tests for {@link PulsarDeserializationSchema}. */
 class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
 
-    private final SourceConfiguration sourceConfig = new SourceConfiguration(new Configuration());
-
     @Test
     void createFromFlinkDeserializationSchema() throws Exception {
-        PulsarDeserializationSchema<String> schema =
-                new PulsarDeserializationSchemaWrapper<>(new SimpleStringSchema());
-        schema.open(new PulsarTestingDeserializationContext(), sourceConfig);
-        assertThatCode(() -> InstantiationUtil.clone(schema)).doesNotThrowAnyException();
+        PulsarDeserializationSchema<String> schema = flinkSchema(new SimpleStringSchema());
+        schema.open(new TestingDeserializationContext(), mock(SourceConfiguration.class));
+        assertDoesNotThrow(() -> InstantiationUtil.clone(schema));
 
-        String content = "some-sample-message-" + randomAlphabetic(10);
-        Message<byte[]> message = getMessage(content, String::getBytes);
+        Message<byte[]> message = getMessage("some-sample-message", String::getBytes);
         SingleMessageCollector<String> collector = new SingleMessageCollector<>();
         schema.deserialize(message, collector);
 
-        assertThat(collector.result).isNotNull().isEqualTo(content);
+        assertNotNull(collector.result);
+        assertEquals(collector.result, "some-sample-message");
     }
 
     @Test
     void createFromPulsarSchema() throws Exception {
         Schema<TestMessage> schema1 = PROTOBUF_NATIVE(TestMessage.class);
-        PulsarDeserializationSchema<TestMessage> schema2 =
-                new PulsarSchemaWrapper<>(schema1, TestMessage.class);
-        schema2.open(new PulsarTestingDeserializationContext(), sourceConfig);
-        assertThatCode(() -> InstantiationUtil.clone(schema2)).doesNotThrowAnyException();
+        PulsarDeserializationSchema<TestMessage> schema2 = pulsarSchema(schema1, TestMessage.class);
+        schema2.open(new TestingDeserializationContext(), mock(SourceConfiguration.class));
+        assertDoesNotThrow(() -> InstantiationUtil.clone(schema2));
 
         TestMessage message1 =
                 TestMessage.newBuilder()
@@ -97,20 +97,19 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         SingleMessageCollector<TestMessage> collector = new SingleMessageCollector<>();
         schema2.deserialize(message2, collector);
 
-        assertThat(collector.result).isNotNull().isEqualTo(message1);
+        assertNotNull(collector.result);
+        assertEquals(collector.result, message1);
     }
 
     @Test
     void createFromFlinkTypeInformation() throws Exception {
-        PulsarDeserializationSchema<String> schema =
-                new PulsarTypeInformationWrapper<>(Types.STRING, null);
-        schema.open(new PulsarTestingDeserializationContext(), sourceConfig);
-        assertThatCode(() -> InstantiationUtil.clone(schema)).doesNotThrowAnyException();
+        PulsarDeserializationSchema<String> schema = flinkTypeInfo(Types.STRING, null);
+        schema.open(new TestingDeserializationContext(), mock(SourceConfiguration.class));
+        assertDoesNotThrow(() -> InstantiationUtil.clone(schema));
 
-        String content = "test-content-" + randomAlphanumeric(10);
         Message<byte[]> message =
                 getMessage(
-                        content,
+                        "test-content",
                         s -> {
                             DataOutputSerializer serializer = new DataOutputSerializer(10);
                             StringValue.writeString(s, serializer);
@@ -119,11 +118,12 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         SingleMessageCollector<String> collector = new SingleMessageCollector<>();
         schema.deserialize(message, collector);
 
-        assertThat(collector.result).isNotNull().isEqualTo(content);
+        assertNotNull(collector.result);
+        assertEquals(collector.result, "test-content");
     }
 
     @Test
-    void primitiveStringPulsarSchema() throws Exception {
+    void primitiveStringPulsarSchema() {
         final String topicName =
                 "primitiveString-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -133,13 +133,12 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
                         TopicNameUtils.topicNameWithPartition(topicName, 0),
                         Schema.STRING,
                         expectedMessage);
-        PulsarSource<String> source =
-                createSource(topicName, new PulsarSchemaWrapper<>(Schema.STRING));
+        PulsarSource<String> source = createSource(topicName, pulsarSchema(Schema.STRING));
         assertThatCode(() -> runPipeline(source, expectedMessage)).doesNotThrowAnyException();
     }
 
     @Test
-    void unversionedJsonStructPulsarSchema() throws Exception {
+    void unversionedJsonStructPulsarSchema() {
         final String topicName =
                 "unversionedJsonStruct-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -151,14 +150,12 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
                         expectedMessage);
         PulsarSource<TestingUser> source =
                 createSource(
-                        topicName,
-                        new PulsarSchemaWrapper<>(
-                                Schema.JSON(TestingUser.class), TestingUser.class));
+                        topicName, pulsarSchema(Schema.JSON(TestingUser.class), TestingUser.class));
         assertThatCode(() -> runPipeline(source, expectedMessage)).doesNotThrowAnyException();
     }
 
     @Test
-    void keyValueJsonStructPulsarSchema() throws Exception {
+    void keyValueJsonStructPulsarSchema() {
         final String topicName =
                 "keyValueJsonStruct-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -173,7 +170,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         PulsarSource<KeyValue<TestingUser, TestingUser>> source =
                 createSource(
                         topicName,
-                        new PulsarSchemaWrapper<>(
+                        pulsarSchema(
                                 Schema.KeyValue(
                                         Schema.JSON(TestingUser.class),
                                         Schema.JSON(TestingUser.class)),
@@ -183,7 +180,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
     }
 
     @Test
-    void keyValueAvroStructPulsarSchema() throws Exception {
+    void keyValueAvroStructPulsarSchema() {
         final String topicName =
                 "keyValueAvroStruct-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -198,7 +195,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         PulsarSource<KeyValue<TestingUser, TestingUser>> source =
                 createSource(
                         topicName,
-                        new PulsarSchemaWrapper<>(
+                        pulsarSchema(
                                 Schema.KeyValue(
                                         Schema.AVRO(TestingUser.class),
                                         Schema.AVRO(TestingUser.class)),
@@ -208,7 +205,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
     }
 
     @Test
-    void keyValuePrimitivePulsarSchema() throws Exception {
+    void keyValuePrimitivePulsarSchema() {
         final String topicName =
                 "keyValuePrimitive-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -221,7 +218,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         PulsarSource<KeyValue<String, Integer>> source =
                 createSource(
                         topicName,
-                        new PulsarSchemaWrapper<>(
+                        pulsarSchema(
                                 Schema.KeyValue(Schema.STRING, Schema.INT32),
                                 String.class,
                                 Integer.class));
@@ -229,7 +226,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
     }
 
     @Test
-    void keyValuePrimitiveKeyStructValuePulsarSchema() throws Exception {
+    void keyValuePrimitiveKeyStructValuePulsarSchema() {
         final String topicName =
                 "primitiveKeyStructValue-"
                         + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
@@ -244,7 +241,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         PulsarSource<KeyValue<String, TestingUser>> source =
                 createSource(
                         topicName,
-                        new PulsarSchemaWrapper<>(
+                        pulsarSchema(
                                 Schema.KeyValue(Schema.STRING, Schema.JSON(TestingUser.class)),
                                 String.class,
                                 TestingUser.class));
@@ -252,7 +249,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
     }
 
     @Test
-    void keyValueStructKeyPrimitiveValuePulsarSchema() throws Exception {
+    void keyValueStructKeyPrimitiveValuePulsarSchema() {
         final String topicName =
                 "structKeyPrimitiveValue-"
                         + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
@@ -267,7 +264,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         PulsarSource<KeyValue<TestingUser, String>> source =
                 createSource(
                         topicName,
-                        new PulsarSchemaWrapper<>(
+                        pulsarSchema(
                                 Schema.KeyValue(Schema.JSON(TestingUser.class), Schema.STRING),
                                 TestingUser.class,
                                 String.class));
@@ -275,7 +272,7 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
     }
 
     @Test
-    void simpleFlinkSchema() throws Exception {
+    void simpleFlinkSchema() {
         final String topicName =
                 "simpleFlinkSchema-" + ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE);
         operator().createTopic(topicName, 1);
@@ -286,19 +283,18 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
                         Schema.STRING,
                         expectedMessage);
         PulsarSource<String> source =
-                createSource(
-                        topicName,
-                        new PulsarDeserializationSchemaWrapper<>(new SimpleStringSchema()));
+                createSource(topicName, flinkSchema(new SimpleStringSchema()));
         assertThatCode(() -> runPipeline(source, expectedMessage)).doesNotThrowAnyException();
     }
 
-    private <T> PulsarSource<T> createSource(
-            String topicName, PulsarDeserializationSchema<T> deserializationSchema) {
+    private PulsarSource createSource(
+            String topicName, PulsarDeserializationSchema<?> deserializationSchema) {
         return PulsarSource.builder()
                 .setDeserializationSchema(deserializationSchema)
                 .setServiceUrl(operator().serviceUrl())
                 .setAdminUrl(operator().adminUrl())
                 .setTopics(topicName)
+                .setSubscriptionType(Exclusive)
                 .setSubscriptionName(topicName + "-subscription")
                 .setBoundedStopCursor(StopCursor.latest())
                 .setConfig(PulsarSourceOptions.PULSAR_PARTITION_DISCOVERY_INTERVAL_MS, -1L)
@@ -387,15 +383,6 @@ class PulsarDeserializationSchemaTest extends PulsarTestSuiteBase {
         @Override
         public void close() {
             // do nothing
-        }
-    }
-
-    private class PulsarTestingDeserializationContext extends TestingDeserializationContext
-            implements PulsarInitializationContext {
-
-        @Override
-        public PulsarClient getPulsarClient() {
-            return operator().client();
         }
     }
 }

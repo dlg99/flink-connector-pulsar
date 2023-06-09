@@ -20,7 +20,9 @@ package org.apache.flink.connector.pulsar.source.enumerator.topic;
 
 import org.junit.jupiter.api.Test;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static java.util.Collections.singletonList;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange.createFullRange;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Unit tests for {@link TopicPartition}. */
 class TopicPartitionTest {
@@ -28,13 +30,23 @@ class TopicPartitionTest {
     @Test
     void topicNameForPartitionedAndNonPartitionedTopic() {
         // For partitioned topic
-        TopicPartition partition = new TopicPartition("test-name", 12);
-        assertThat(partition.getFullTopicName())
-                .isEqualTo("persistent://public/default/test-name-partition-12");
+        TopicPartition partition =
+                new TopicPartition("test-name", 12, singletonList(createFullRange()));
+        assertEquals(
+                partition.getFullTopicName(), "persistent://public/default/test-name-partition-12");
 
         // For non-partitioned topic
-        TopicPartition partition1 = new TopicPartition("test-topic", -1);
-        assertThat(partition1.getFullTopicName())
-                .isEqualTo("persistent://public/default/test-topic");
+        TopicPartition partition1 =
+                new TopicPartition("test-topic", -1, singletonList(createFullRange()));
+        assertEquals(partition1.getFullTopicName(), "persistent://public/default/test-topic");
+    }
+
+    @Test
+    void directlyCreateTopicWithPartitionedName() {
+        TopicPartition partition = new TopicPartition("test-name-partition-4");
+        assertEquals(
+                partition.getFullTopicName(), "persistent://public/default/test-name-partition-4");
+        assertEquals(partition.getTopic(), "persistent://public/default/test-name");
+        assertEquals(partition.getPartitionId(), 4);
     }
 }

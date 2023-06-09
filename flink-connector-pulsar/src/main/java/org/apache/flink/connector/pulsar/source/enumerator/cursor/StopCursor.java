@@ -34,15 +34,15 @@ import java.io.Serializable;
 
 /**
  * An interface for users to specify the stop position of a pulsar subscription. Since it would be
- * serialized into split, the implementation for this interface should be well considered. It's not
- * recommended to add extra internal state for this implementation.
+ * serialized into split. The implementation for this interface should be well considered. I don't
+ * recommend adding extra internal state for this implementation.
  */
 @PublicEvolving
 @FunctionalInterface
 public interface StopCursor extends Serializable {
 
     /** The open method for the cursor initializer. This method could be executed multiple times. */
-    default void open(PulsarAdmin admin, TopicPartition partition) throws Exception {}
+    default void open(PulsarAdmin admin, TopicPartition partition) {}
 
     /** Determine whether to pause consumption on the current message by the returned enum. */
     StopCondition shouldStop(Message<?> message);

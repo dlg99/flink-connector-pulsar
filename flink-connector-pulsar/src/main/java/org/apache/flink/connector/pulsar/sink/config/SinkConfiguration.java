@@ -19,7 +19,7 @@
 package org.apache.flink.connector.pulsar.sink.config;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.api.connector.sink2.Sink.InitContext;
+import org.apache.flink.api.connector.sink.Sink.InitContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.pulsar.common.config.PulsarConfiguration;
@@ -31,13 +31,12 @@ import org.apache.pulsar.client.api.Schema;
 
 import java.util.Objects;
 
-import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_BATCHING_MAX_MESSAGES;
-import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_ENABLE_SINK_METRICS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_MAX_RECOMMIT_TIMES;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_MESSAGE_KEY_HASH;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SINK_TOPIC_AUTO_CREATION;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_TOPIC_METADATA_REFRESH_INTERVAL;
-import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_VALIDATE_SINK_MESSAGE_BYTES;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_DELIVERY_GUARANTEE;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_SCHEMA_EVOLUTION;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_TRANSACTION_TIMEOUT;
@@ -54,8 +53,8 @@ public class SinkConfiguration extends PulsarConfiguration {
     private final MessageKeyHash messageKeyHash;
     private final boolean enableSchemaEvolution;
     private final int maxRecommitTimes;
-    private final boolean enableMetrics;
-    private final boolean validateSinkMessageBytes;
+    private final boolean enableTopicAutoCreation;
+    private final int defaultTopicPartitions;
 
     public SinkConfiguration(Configuration configuration) {
         super(configuration);
@@ -67,9 +66,8 @@ public class SinkConfiguration extends PulsarConfiguration {
         this.messageKeyHash = get(PULSAR_MESSAGE_KEY_HASH);
         this.enableSchemaEvolution = get(PULSAR_WRITE_SCHEMA_EVOLUTION);
         this.maxRecommitTimes = get(PULSAR_MAX_RECOMMIT_TIMES);
-        this.enableMetrics =
-                get(PULSAR_ENABLE_SINK_METRICS) && get(PULSAR_STATS_INTERVAL_SECONDS) > 0;
-        this.validateSinkMessageBytes = get(PULSAR_VALIDATE_SINK_MESSAGE_BYTES);
+        this.enableTopicAutoCreation = get(PULSAR_SINK_TOPIC_AUTO_CREATION);
+        this.defaultTopicPartitions = get(PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS);
     }
 
     /** The delivery guarantee changes the behavior of {@link PulsarWriter}. */
@@ -121,14 +119,14 @@ public class SinkConfiguration extends PulsarConfiguration {
         return maxRecommitTimes;
     }
 
-    /** Whether to expose the metrics from Pulsar Producer. */
-    public boolean isEnableMetrics() {
-        return enableMetrics;
+    /** Could the connector auto create the non-existed topics on the Pulsar? */
+    public boolean isEnableTopicAutoCreation() {
+        return enableTopicAutoCreation;
     }
 
-    /** Whether to add extra schema check for byte messages. */
-    public boolean isValidateSinkMessageBytes() {
-        return validateSinkMessageBytes;
+    /** The default partition size when we enable the topic auto creation. */
+    public int getDefaultTopicPartitions() {
+        return defaultTopicPartitions;
     }
 
     @Override
@@ -143,27 +141,29 @@ public class SinkConfiguration extends PulsarConfiguration {
             return false;
         }
         SinkConfiguration that = (SinkConfiguration) o;
-        return transactionTimeoutMillis == that.transactionTimeoutMillis
+        return deliveryGuarantee == that.deliveryGuarantee
+                && transactionTimeoutMillis == that.transactionTimeoutMillis
                 && topicMetadataRefreshInterval == that.topicMetadataRefreshInterval
                 && partitionSwitchSize == that.partitionSwitchSize
-                && enableSchemaEvolution == that.enableSchemaEvolution
                 && messageKeyHash == that.messageKeyHash
+                && enableSchemaEvolution == that.enableSchemaEvolution
                 && maxRecommitTimes == that.maxRecommitTimes
-                && enableMetrics == that.enableMetrics
-                && validateSinkMessageBytes == that.validateSinkMessageBytes;
+                && enableTopicAutoCreation == that.enableTopicAutoCreation
+                && defaultTopicPartitions == that.defaultTopicPartitions;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
                 super.hashCode(),
+                deliveryGuarantee,
                 transactionTimeoutMillis,
                 topicMetadataRefreshInterval,
                 partitionSwitchSize,
                 messageKeyHash,
                 enableSchemaEvolution,
                 maxRecommitTimes,
-                enableMetrics,
-                validateSinkMessageBytes);
+                enableTopicAutoCreation,
+                defaultTopicPartitions);
     }
 }

@@ -21,10 +21,10 @@ package org.apache.flink.connector.pulsar.source.enumerator.cursor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsAddition;
-import org.apache.flink.connector.pulsar.common.crypto.PulsarCrypto;
+import org.apache.flink.connector.pulsar.common.request.PulsarAdminRequest;
 import org.apache.flink.connector.pulsar.source.config.SourceConfiguration;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
-import org.apache.flink.connector.pulsar.source.reader.PulsarPartitionSplitReader;
+import org.apache.flink.connector.pulsar.source.reader.split.PulsarOrderedPartitionSplitReader;
 import org.apache.flink.connector.pulsar.source.split.PulsarPartitionSplit;
 import org.apache.flink.connector.pulsar.testutils.PulsarTestSuiteBase;
 
@@ -33,34 +33,36 @@ import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Schema;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+
 import static java.util.Collections.singletonList;
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphanumeric;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_DEFAULT_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE;
-import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_FETCH_ONE_MESSAGE_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_RECORDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_NAME;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.topicNameWithPartition;
-import static org.apache.flink.metrics.groups.UnregisteredMetricsGroup.createSourceReaderMetricGroup;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange.createFullRange;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Test different implementation of StopCursor. */
 class StopCursorTest extends PulsarTestSuiteBase {
 
     @Test
-    void publishTimeStopCursor() throws Exception {
-        String topicName = "stop-cursor-" + randomAlphanumeric(5);
+    void publishTimeStopCursor() throws IOException {
+        String topicName = randomAlphanumeric(5);
         operator().createTopic(topicName, 2);
+        SourceConfiguration sourceConfig = sourceConfig();
 
-        PulsarPartitionSplitReader splitReader =
-                new PulsarPartitionSplitReader(
+        PulsarOrderedPartitionSplitReader splitReader =
+                new PulsarOrderedPartitionSplitReader(
                         operator().client(),
-                        operator().admin(),
-                        sourceConfig(),
+                        new PulsarAdminRequest(operator().admin(), sourceConfig),
+                        sourceConfig,
                         Schema.BYTES,
-                        PulsarCrypto.disabled(),
-                        createSourceReaderMetricGroup());
+                        null);
         // send the first message and set the stopCursor to filter any late stopCursor
         operator()
                 .sendMessage(
@@ -68,7 +70,8 @@ class StopCursorTest extends PulsarTestSuiteBase {
                         Schema.STRING,
                         randomAlphanumeric(10));
         long currentTimeStamp = System.currentTimeMillis();
-        TopicPartition partition = new TopicPartition(topicName, 0);
+        TopicPartition partition =
+                new TopicPartition(topicName, 0, singletonList(createFullRange()));
         PulsarPartitionSplit split =
                 new PulsarPartitionSplit(
                         partition,
@@ -96,7 +99,7 @@ class StopCursorTest extends PulsarTestSuiteBase {
     private SourceConfiguration sourceConfig() {
         Configuration config = operator().config();
         config.set(PULSAR_MAX_FETCH_RECORDS, 1);
-        config.set(PULSAR_FETCH_ONE_MESSAGE_TIME, 2000);
+        config.set(PULSAR_DEFAULT_FETCH_TIME, 2000L);
         config.set(PULSAR_MAX_FETCH_TIME, 3000L);
         config.set(PULSAR_SUBSCRIPTION_NAME, randomAlphabetic(10));
         config.set(PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE, true);

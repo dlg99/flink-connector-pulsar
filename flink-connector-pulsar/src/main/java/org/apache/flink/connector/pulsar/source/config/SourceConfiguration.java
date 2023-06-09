@@ -19,9 +19,11 @@
 package org.apache.flink.connector.pulsar.source.config;
 
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
 import org.apache.flink.connector.pulsar.common.config.PulsarConfiguration;
+import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSchemaWrapper;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.CursorPosition;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StartCursor;
 
@@ -34,19 +36,18 @@ import java.time.Duration;
 import java.util.Objects;
 
 import static org.apache.flink.connector.base.source.reader.SourceReaderOptions.ELEMENT_QUEUE_CAPACITY;
-import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ALLOW_KEY_SHARED_OUT_OF_ORDER_DELIVERY;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_AUTO_COMMIT_CURSOR_INTERVAL;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_DEFAULT_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE;
-import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_SOURCE_METRICS;
-import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_FETCH_ONE_MESSAGE_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_RECORDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_MAX_FETCH_TIME;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_PARTITION_DISCOVERY_INTERVAL_MS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_READ_SCHEMA_EVOLUTION;
-import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_RESET_SUBSCRIPTION_CURSOR;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_READ_TRANSACTION_TIMEOUT;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_MODE;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_NAME;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_TYPE;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_VERIFY_INITIAL_OFFSETS;
 
 /** The configuration class for pulsar source. */
@@ -57,17 +58,17 @@ public class SourceConfiguration extends PulsarConfiguration {
     private final int messageQueueCapacity;
     private final long partitionDiscoveryIntervalMs;
     private final boolean enableAutoAcknowledgeMessage;
+    private final boolean enableSchemaEvolution;
     private final long autoCommitCursorInterval;
-    private final int fetchOneMessageTime;
+    private final long transactionTimeoutMillis;
+    private final Duration defaultFetchTime;
     private final Duration maxFetchTime;
     private final int maxFetchRecords;
     private final CursorVerification verifyInitialOffsets;
     private final String subscriptionName;
+    private final SubscriptionType subscriptionType;
     private final SubscriptionMode subscriptionMode;
     private final boolean allowKeySharedOutOfOrderDelivery;
-    private final boolean enableSchemaEvolution;
-    private final boolean enableMetrics;
-    private final boolean resetSubscriptionCursor;
 
     public SourceConfiguration(Configuration configuration) {
         super(configuration);
@@ -75,18 +76,17 @@ public class SourceConfiguration extends PulsarConfiguration {
         this.messageQueueCapacity = getInteger(ELEMENT_QUEUE_CAPACITY);
         this.partitionDiscoveryIntervalMs = get(PULSAR_PARTITION_DISCOVERY_INTERVAL_MS);
         this.enableAutoAcknowledgeMessage = get(PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE);
+        this.enableSchemaEvolution = get(PULSAR_READ_SCHEMA_EVOLUTION);
         this.autoCommitCursorInterval = get(PULSAR_AUTO_COMMIT_CURSOR_INTERVAL);
-        this.fetchOneMessageTime = getOptional(PULSAR_FETCH_ONE_MESSAGE_TIME).orElse(0);
+        this.transactionTimeoutMillis = get(PULSAR_READ_TRANSACTION_TIMEOUT);
+        this.defaultFetchTime = get(PULSAR_DEFAULT_FETCH_TIME, Duration::ofMillis);
         this.maxFetchTime = get(PULSAR_MAX_FETCH_TIME, Duration::ofMillis);
         this.maxFetchRecords = get(PULSAR_MAX_FETCH_RECORDS);
         this.verifyInitialOffsets = get(PULSAR_VERIFY_INITIAL_OFFSETS);
         this.subscriptionName = get(PULSAR_SUBSCRIPTION_NAME);
+        this.subscriptionType = get(PULSAR_SUBSCRIPTION_TYPE);
         this.subscriptionMode = get(PULSAR_SUBSCRIPTION_MODE);
         this.allowKeySharedOutOfOrderDelivery = get(PULSAR_ALLOW_KEY_SHARED_OUT_OF_ORDER_DELIVERY);
-        this.enableSchemaEvolution = get(PULSAR_READ_SCHEMA_EVOLUTION);
-        this.enableMetrics =
-                get(PULSAR_ENABLE_SOURCE_METRICS) && get(PULSAR_STATS_INTERVAL_SECONDS) > 0;
-        this.resetSubscriptionCursor = get(PULSAR_RESET_SUBSCRIPTION_CURSOR);
     }
 
     /** The capacity of the element queue in the source reader. */
@@ -123,6 +123,14 @@ public class SourceConfiguration extends PulsarConfiguration {
     }
 
     /**
+     * If we should deserialize the message with a specified Pulsar {@link Schema} instead the
+     * default {@link Schema#BYTES}. This switch is only used for {@link PulsarSchemaWrapper}.
+     */
+    public boolean isEnableSchemaEvolution() {
+        return enableSchemaEvolution;
+    }
+
+    /**
      * The interval in millis for acknowledge message when you enable {@link
      * #isEnableAutoAcknowledgeMessage} and use {@link SubscriptionType#Failover} or {@link
      * SubscriptionType#Exclusive} as your consuming subscription type.
@@ -132,11 +140,22 @@ public class SourceConfiguration extends PulsarConfiguration {
     }
 
     /**
-     * The fetch time for polling one message. We would stop polling messages and return the
-     * messages in {@link RecordsWithSplitIds} when meet this timeout and no message consumed.
+     * Pulsar's transaction have a timeout mechanism for uncommitted transaction. We use transaction
+     * for {@link SubscriptionType#Shared} and {@link SubscriptionType#Key_Shared} when user disable
+     * {@link #isEnableAutoAcknowledgeMessage} and enable flink checkpoint. Since the checkpoint
+     * interval couldn't be acquired from {@link SourceReaderContext#getConfiguration()}, we have to
+     * expose this option. Make sure this value is greater than the checkpoint interval.
      */
-    public int getFetchOneMessageTime() {
-        return fetchOneMessageTime;
+    public long getTransactionTimeoutMillis() {
+        return transactionTimeoutMillis;
+    }
+
+    /**
+     * The fetch time for polling one message. We would stop polling message and return the message
+     * in {@link RecordsWithSplitIds} when timeout and no message consumed.
+     */
+    public Duration getDefaultFetchTime() {
+        return defaultFetchTime;
     }
 
     /**
@@ -172,6 +191,16 @@ public class SourceConfiguration extends PulsarConfiguration {
     }
 
     /**
+     * The pulsar's subscription type for this flink source. All the readers would share this
+     * subscription type.
+     *
+     * @see SubscriptionType
+     */
+    public SubscriptionType getSubscriptionType() {
+        return subscriptionType;
+    }
+
+    /**
      * The pulsar's subscription mode for this flink source. All the readers would share this
      * subscription mode.
      *
@@ -186,29 +215,6 @@ public class SourceConfiguration extends PulsarConfiguration {
         return allowKeySharedOutOfOrderDelivery;
     }
 
-    /**
-     * If we need to deserialize the message with a specified Pulsar {@link Schema} instead the
-     * default {@link Schema#BYTES}. This switch is only used for {@code PulsarSchemaWrapper}.
-     */
-    public boolean isEnableSchemaEvolution() {
-        return enableSchemaEvolution;
-    }
-
-    /** Whether to expose the metrics from Pulsar Consumer. */
-    public boolean isEnableMetrics() {
-        return enableMetrics;
-    }
-
-    /** Whether to reset the start cursor in subscription. */
-    public boolean isResetSubscriptionCursor() {
-        return resetSubscriptionCursor;
-    }
-
-    /** Convert the subscription into a readable str. */
-    public String getSubscriptionDesc() {
-        return getSubscriptionName() + "(Exclusive," + getSubscriptionMode() + ")";
-    }
-
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -221,39 +227,35 @@ public class SourceConfiguration extends PulsarConfiguration {
             return false;
         }
         SourceConfiguration that = (SourceConfiguration) o;
-        return messageQueueCapacity == that.messageQueueCapacity
-                && partitionDiscoveryIntervalMs == that.partitionDiscoveryIntervalMs
+        return partitionDiscoveryIntervalMs == that.partitionDiscoveryIntervalMs
                 && enableAutoAcknowledgeMessage == that.enableAutoAcknowledgeMessage
                 && autoCommitCursorInterval == that.autoCommitCursorInterval
-                && fetchOneMessageTime == that.fetchOneMessageTime
+                && transactionTimeoutMillis == that.transactionTimeoutMillis
+                && Objects.equals(defaultFetchTime, that.defaultFetchTime)
                 && Objects.equals(maxFetchTime, that.maxFetchTime)
                 && maxFetchRecords == that.maxFetchRecords
                 && verifyInitialOffsets == that.verifyInitialOffsets
                 && Objects.equals(subscriptionName, that.subscriptionName)
+                && subscriptionType == that.subscriptionType
                 && subscriptionMode == that.subscriptionMode
-                && allowKeySharedOutOfOrderDelivery == that.allowKeySharedOutOfOrderDelivery
-                && enableSchemaEvolution == that.enableSchemaEvolution
-                && enableMetrics == that.enableMetrics
-                && resetSubscriptionCursor == that.resetSubscriptionCursor;
+                && allowKeySharedOutOfOrderDelivery == that.allowKeySharedOutOfOrderDelivery;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
                 super.hashCode(),
-                messageQueueCapacity,
                 partitionDiscoveryIntervalMs,
                 enableAutoAcknowledgeMessage,
                 autoCommitCursorInterval,
-                fetchOneMessageTime,
+                transactionTimeoutMillis,
+                defaultFetchTime,
                 maxFetchTime,
                 maxFetchRecords,
                 verifyInitialOffsets,
                 subscriptionName,
+                subscriptionType,
                 subscriptionMode,
-                allowKeySharedOutOfOrderDelivery,
-                enableSchemaEvolution,
-                enableMetrics,
-                resetSubscriptionCursor);
+                allowKeySharedOutOfOrderDelivery);
     }
 }

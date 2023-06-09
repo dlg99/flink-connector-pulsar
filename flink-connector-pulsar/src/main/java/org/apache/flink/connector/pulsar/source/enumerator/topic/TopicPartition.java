@@ -21,38 +21,39 @@ package org.apache.flink.connector.pulsar.source.enumerator.topic;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
-import org.apache.flink.connector.pulsar.sink.writer.router.TopicRouter;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator.KeySharedMode;
+
+import org.apache.flink.shaded.guava30.com.google.common.collect.ImmutableList;
 
 import org.apache.pulsar.client.api.Range;
 import org.apache.pulsar.client.api.SubscriptionType;
-import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.shade.com.google.common.collect.ImmutableList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.List;
 import java.util.Objects;
 
 import static java.util.stream.Collectors.toList;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.extractPartitionId;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.isPartitioned;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.topicName;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.topicNameWithPartition;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange.createFullRange;
-import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator.KeySharedMode.SPLIT;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * Topic partition is the basic topic information used by {@link SplitReader} and {@link
- * TopicRouter}.
+ * Topic partition is the basic topic information used by {@link SplitReader}, we create this topic
+ * metas for a specified topic by subscription type and convert it into a partition split.
  */
 @PublicEvolving
 public class TopicPartition implements Serializable {
     private static final long serialVersionUID = -1474354741550810953L;
 
-    private static final Logger LOG = LoggerFactory.getLogger(TopicPartition.class);
+    private static final List<TopicRange> FULL_RANGES = ImmutableList.of(createFullRange());
 
     /**
      * If {@link TopicPartition#getPartitionId()} is equal to this. This topic partition wouldn't be
-     * a partition instance. It would be a non-partitioned topic name.
+     * a partition instance. It would be a top topic name.
      */
     public static final int NON_PARTITION_ID = -1;
 
@@ -77,41 +78,33 @@ public class TopicPartition implements Serializable {
      */
     private final List<TopicRange> ranges;
 
-    /** Create a non-partition topic without partition information. */
-    @PublicEvolving
+    /**
+     * The key share mode for the {@link SubscriptionType#Key_Shared}. It will be {@link
+     * KeySharedMode#JOIN} for other subscriptions.
+     */
+    private final KeySharedMode mode;
+
     public TopicPartition(String topic) {
-        TopicName topicName = TopicName.get(topic);
-        this.topic = topicName.getPartitionedTopicName();
-        this.partitionId =
-                topicName.isPartitioned() ? topicName.getPartitionIndex() : NON_PARTITION_ID;
-        this.ranges = FULL_RANGES;
+        this(topic, extractPartitionId(topic));
     }
 
-    /** Create a topic partition without key hash range. */
-    @PublicEvolving
     public TopicPartition(String topic, int partitionId) {
-        this(topic, partitionId, FULL_RANGES);
+        this(topic, partitionId, FULL_RANGES, SPLIT);
     }
 
-    /** Create a non-partition topic with key hash range. */
-    @Internal
-    public TopicPartition(String topic, List<TopicRange> ranges) {
-        this(topic, NON_PARTITION_ID, ranges);
-    }
-
-    @Internal
     public TopicPartition(String topic, int partitionId, List<TopicRange> ranges) {
-        checkArgument(partitionId >= NON_PARTITION_ID, "Invalid partition id.");
+        this(topic, partitionId, ranges, SPLIT);
+    }
 
-        TopicName topicName = TopicName.get(topic);
-        this.topic = topicName.getPartitionedTopicName();
-        if (partitionId == NON_PARTITION_ID && topicName.isPartitioned()) {
-            LOG.warn("Invalid non partition id, this topic {} is a partitioned topic", topic);
-            this.partitionId = topicName.getPartitionIndex();
-        } else {
-            this.partitionId = partitionId;
-        }
+    public TopicPartition(
+            String topic, int partitionId, List<TopicRange> ranges, KeySharedMode mode) {
+        this.topic = topicName(checkNotNull(topic));
+        this.partitionId =
+                partitionId == NON_PARTITION_ID && isPartitioned(topic)
+                        ? extractPartitionId(topic)
+                        : partitionId;
         this.ranges = checkNotNull(ranges);
+        this.mode = mode;
     }
 
     public String getTopic() {
@@ -122,6 +115,7 @@ public class TopicPartition implements Serializable {
         return partitionId;
     }
 
+    /** @return Is this a partition instance or a topic instance? */
     public boolean isPartition() {
         return partitionId != NON_PARTITION_ID;
     }
@@ -150,6 +144,12 @@ public class TopicPartition implements Serializable {
         return ranges.stream().map(TopicRange::toPulsarRange).collect(toList());
     }
 
+    /** This method is internal used for key shared mode. */
+    @Internal
+    public KeySharedMode getMode() {
+        return mode;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -162,12 +162,13 @@ public class TopicPartition implements Serializable {
 
         return partitionId == partition.partitionId
                 && topic.equals(partition.topic)
-                && ranges.equals(partition.ranges);
+                && ranges.equals(partition.ranges)
+                && mode == partition.mode;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(topic, partitionId, ranges);
+        return Objects.hash(topic, partitionId, ranges, mode);
     }
 
     @Override

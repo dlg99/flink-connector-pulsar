@@ -19,15 +19,13 @@
 package org.apache.flink.connector.pulsar.source;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.pulsar.common.config.PulsarConfigBuilder;
 import org.apache.flink.connector.pulsar.common.config.PulsarOptions;
-import org.apache.flink.connector.pulsar.common.crypto.PulsarCrypto;
+import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSchemaWrapper;
 import org.apache.flink.connector.pulsar.source.config.SourceConfiguration;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StartCursor;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StopCursor;
@@ -36,22 +34,17 @@ import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.FullRangeGenerator;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.GenericRecordDeserializationSchema;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.GenericRecordDeserializer;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.SplitRangeGenerator;
 import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchemaWrapper;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarSchemaWrapper;
-import org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarTypeInformationWrapper;
 
-import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
+import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.RegexSubscriptionMode;
 import org.apache.pulsar.client.api.Schema;
-import org.apache.pulsar.client.api.schema.GenericRecord;
-import org.apache.pulsar.common.schema.KeyValue;
-import org.apache.pulsar.common.schema.SchemaInfo;
-import org.apache.pulsar.common.schema.SchemaType;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.List;
@@ -59,16 +52,20 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Pattern;
 
+import static java.lang.Boolean.FALSE;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_ADMIN_URL;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PARAMS;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PARAM_MAP;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PLUGIN_CLASS_NAME;
+import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_ENABLE_TRANSACTION;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_SERVICE_URL;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_CONSUMER_NAME;
-import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_CRYPTO_FAILURE_ACTION;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_PARTITION_DISCOVERY_INTERVAL_MS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_READ_SCHEMA_EVOLUTION;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_READ_TRANSACTION_TIMEOUT;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_NAME;
+import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.PULSAR_SUBSCRIPTION_TYPE;
 import static org.apache.flink.connector.pulsar.source.config.PulsarSourceConfigUtils.SOURCE_CONFIG_VALIDATOR;
 import static org.apache.flink.util.InstantiationUtil.isSerializable;
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -89,7 +86,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  *     .setAdminUrl(PULSAR_BROKER_HTTP_URL)
  *     .setSubscriptionName("flink-source-1")
  *     .setTopics(Arrays.asList(TOPIC1, TOPIC2))
- *     .setDeserializationSchema(new SimpleStringSchema())
+ *     .setDeserializationSchema(PulsarDeserializationSchema.flinkSchema(new SimpleStringSchema()))
  *     .build();
  * }</pre>
  *
@@ -118,7 +115,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  *     .setAdminUrl(PULSAR_BROKER_HTTP_URL)
  *     .setSubscriptionName("flink-source-1")
  *     .setTopics(Arrays.asList(TOPIC1, TOPIC2))
- *     .setDeserializationSchema(new SimpleStringSchema())
+ *     .setDeserializationSchema(PulsarDeserializationSchema.flinkSchema(new SimpleStringSchema()))
  *     .setUnboundedStopCursor(StopCursor.atEventTime(System.currentTimeMillis()))
  *     .build();
  * }</pre>
@@ -137,7 +134,7 @@ public final class PulsarSourceBuilder<OUT> {
     private StopCursor stopCursor;
     private Boundedness boundedness;
     private PulsarDeserializationSchema<OUT> deserializationSchema;
-    private PulsarCrypto pulsarCrypto;
+    @Nullable private CryptoKeyReader cryptoKeyReader;
 
     // private builder constructor.
     PulsarSourceBuilder() {
@@ -178,12 +175,26 @@ public final class PulsarSourceBuilder<OUT> {
     }
 
     /**
-     * Set a pulsar topic list for the flink source. Some topics may not exist currently, consuming
-     * this non-existed topic wouldn't throw any exception. But the best solution is just consuming
-     * by using a topic regex. You can set topics once either with {@link #setTopics} or {@link
+     * {@link SubscriptionType} is the consuming behavior for pulsar, we would generator different
+     * split by the given subscription type. Please take some time to consider which subscription
+     * type matches your application best. Default is {@link SubscriptionType#Shared}.
+     *
+     * @param subscriptionType The type of subscription.
+     * @return this PulsarSourceBuilder.
+     * @see <a href="https://pulsar.apache.org/docs/en/concepts-messaging/#subscriptions">Pulsar
+     *     Subscriptions</a>
+     */
+    public PulsarSourceBuilder<OUT> setSubscriptionType(SubscriptionType subscriptionType) {
+        return setConfig(PULSAR_SUBSCRIPTION_TYPE, subscriptionType);
+    }
+
+    /**
+     * Set a pulsar topic list for flink source. Some topic may not exist currently, consuming this
+     * non-existed topic wouldn't throw any exception. But the best solution is just consuming by
+     * using a topic regex. You can set topics once either with {@link #setTopics} or {@link
      * #setTopicPattern} in this builder.
      *
-     * @param topics The topic list you would like to consume messages.
+     * @param topics The topic list you would like to consume message.
      * @return this PulsarSourceBuilder.
      */
     public PulsarSourceBuilder<OUT> setTopics(String... topics) {
@@ -191,12 +202,12 @@ public final class PulsarSourceBuilder<OUT> {
     }
 
     /**
-     * Set a pulsar topic list for the flink source. Some topics may not exist currently, consuming
-     * this non-existed topic wouldn't throw any exception. But the best solution is just consuming
-     * by using a topic regex. You can set topics once either with {@link #setTopics} or {@link
+     * Set a pulsar topic list for flink source. Some topic may not exist currently, consuming this
+     * non-existed topic wouldn't throw any exception. But the best solution is just consuming by
+     * using a topic regex. You can set topics once either with {@link #setTopics} or {@link
      * #setTopicPattern} in this builder.
      *
-     * @param topics The topic list you would like to consume messages.
+     * @param topics The topic list you would like to consume message.
      * @return this PulsarSourceBuilder.
      */
     public PulsarSourceBuilder<OUT> setTopics(List<String> topics) {
@@ -245,7 +256,14 @@ public final class PulsarSourceBuilder<OUT> {
      * will use default one instead.
      *
      * @param topicsPattern the pattern of the topic name to consume from.
-     * @param regexSubscriptionMode The topic filter for regex subscription.
+     * @param regexSubscriptionMode When subscribing to a topic using a regular expression, you can
+     *     pick a certain type of topics.
+     *     <ul>
+     *       <li>PersistentOnly: only subscribe to persistent topics.
+     *       <li>NonPersistentOnly: only subscribe to non-persistent topics.
+     *       <li>AllTopics: subscribe to both persistent and non-persistent topics.
+     *     </ul>
+     *
      * @return this PulsarSourceBuilder.
      */
     public PulsarSourceBuilder<OUT> setTopicPattern(
@@ -263,7 +281,7 @@ public final class PulsarSourceBuilder<OUT> {
      *
      * @param topicsPattern the pattern of the topic name to consume from.
      * @param regexSubscriptionMode When subscribing to a topic using a regular expression, you can
-     *     pick a certain type of topic.
+     *     pick a certain type of topics.
      *     <ul>
      *       <li>PersistentOnly: only subscribe to persistent topics.
      *       <li>NonPersistentOnly: only subscribe to non-persistent topics.
@@ -298,13 +316,23 @@ public final class PulsarSourceBuilder<OUT> {
     }
 
     /**
-     * Set a topic range generator for consuming a sub set of keys.
+     * Set a topic range generator for Key_Shared subscription.
      *
      * @param rangeGenerator A generator which would generate a set of {@link TopicRange} for given
      *     topic.
      * @return this PulsarSourceBuilder.
      */
     public PulsarSourceBuilder<OUT> setRangeGenerator(RangeGenerator rangeGenerator) {
+        if (configBuilder.contains(PULSAR_SUBSCRIPTION_TYPE)) {
+            SubscriptionType subscriptionType = configBuilder.get(PULSAR_SUBSCRIPTION_TYPE);
+            checkArgument(
+                    subscriptionType == SubscriptionType.Key_Shared,
+                    "Key_Shared subscription should be used for custom rangeGenerator instead of %s",
+                    subscriptionType);
+        } else {
+            LOG.warn("No subscription type provided, set it to Key_Shared.");
+            setSubscriptionType(SubscriptionType.Key_Shared);
+        }
         this.rangeGenerator = checkNotNull(rangeGenerator);
         return this;
     }
@@ -369,96 +397,18 @@ public final class PulsarSourceBuilder<OUT> {
     }
 
     /**
-     * Deserialize messages from Pulsar by using the flink's {@link DeserializationSchema}. It would
-     * consume the pulsar message as a byte array and decode the message by using flink's logic.
-     */
-    public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
-            DeserializationSchema<T> deserializationSchema) {
-        return setDeserializationSchema(
-                new PulsarDeserializationSchemaWrapper<>(deserializationSchema));
-    }
-
-    /**
-     * Deserialize the messages from Pulsar by using {@link Schema#AUTO_CONSUME()}. It will turn the
-     * pulsar message into a {@link GenericRecord} first. Using this method can consume the messages
-     * with multiple schemas in the same topic.
-     */
-    public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
-            GenericRecordDeserializer<T> deserializer) {
-        return setDeserializationSchema(new GenericRecordDeserializationSchema<>(deserializer));
-    }
-
-    /**
-     * Deserialize messages from Pulsar by using the Pulsar {@link Schema} instance. It would
-     * consume the pulsar message as a byte array and decode the message by using flink's logic.
+     * DeserializationSchema is required for getting the {@link Schema} for deserialize message from
+     * pulsar and getting the {@link TypeInformation} for message serialization in flink.
      *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#primitive-type">primitive
-     * types</a> here.
-     */
-    public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(Schema<T> schema) {
-        ensureSchemaTypeIsValid(schema);
-        return setDeserializationSchema(new PulsarSchemaWrapper<>(schema));
-    }
-
-    /**
-     * Deserialize messages from Pulsar by using the Pulsar {@link Schema} instance. It would
-     * consume the pulsar message as a byte array and decode the message by using flink's logic.
-     *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#struct">struct types</a> here.
-     */
-    public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
-            Schema<T> schema, Class<T> typeClass) {
-        ensureSchemaTypeIsValid(schema);
-        return setDeserializationSchema(new PulsarSchemaWrapper<>(schema, typeClass));
-    }
-
-    /**
-     * Deserialize messages from Pulsar by using the Pulsar {@link Schema} instance. It would
-     * consume the pulsar message as a byte array and decode the message by using flink's logic.
-     *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#keyvalue">keyvalue types</a> here.
-     */
-    public <K, V, T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
-            Schema<KeyValue<K, V>> schema, Class<K> keyClass, Class<V> valueClass) {
-        ensureSchemaTypeIsValid(schema);
-        return setDeserializationSchema(new PulsarSchemaWrapper<>(schema, keyClass, valueClass));
-    }
-
-    /**
-     * Deserialize messages from Pulsar by using the flink's {@link TypeInformation}. This method is
-     * only used for treating messages that was written into pulsar by {@link TypeInformation}.
-     */
-    public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
-            TypeInformation<T> information, ExecutionConfig config) {
-        return setDeserializationSchema(new PulsarTypeInformationWrapper<>(information, config));
-    }
-
-    /**
-     * PulsarDeserializationSchema is required for deserializing messages from Pulsar and getting
-     * the {@link TypeInformation} for message serialization in flink.
+     * <p>We have defined a set of implementations, using {@code
+     * PulsarDeserializationSchema#pulsarSchema} or {@code PulsarDeserializationSchema#flinkSchema}
+     * for creating the desired schema.
      */
     public <T extends OUT> PulsarSourceBuilder<T> setDeserializationSchema(
             PulsarDeserializationSchema<T> deserializationSchema) {
         PulsarSourceBuilder<T> self = specialized();
         self.deserializationSchema = deserializationSchema;
         return self;
-    }
-
-    /**
-     * Sets a {@link PulsarCrypto}. Configure the key reader and keys to be used to encrypt the
-     * message payloads.
-     *
-     * @param pulsarCrypto PulsarCrypto object.
-     * @return this PulsarSourceBuilder.
-     */
-    public PulsarSourceBuilder<OUT> setPulsarCrypto(
-            PulsarCrypto pulsarCrypto, ConsumerCryptoFailureAction action) {
-        this.pulsarCrypto = checkNotNull(pulsarCrypto);
-        configBuilder.set(PULSAR_CRYPTO_FAILURE_ACTION, action);
-        return this;
     }
 
     /**
@@ -471,9 +421,6 @@ public final class PulsarSourceBuilder<OUT> {
      */
     public PulsarSourceBuilder<OUT> setAuthentication(
             String authPluginClassName, String authParamsString) {
-        checkArgument(
-                !configBuilder.contains(PULSAR_AUTH_PARAM_MAP),
-                "Duplicated authentication setting.");
         configBuilder.set(PULSAR_AUTH_PLUGIN_CLASS_NAME, authPluginClassName);
         configBuilder.set(PULSAR_AUTH_PARAMS, authParamsString);
         return this;
@@ -488,10 +435,20 @@ public final class PulsarSourceBuilder<OUT> {
      */
     public PulsarSourceBuilder<OUT> setAuthentication(
             String authPluginClassName, Map<String, String> authParams) {
-        checkArgument(
-                !configBuilder.contains(PULSAR_AUTH_PARAMS), "Duplicated authentication setting.");
         configBuilder.set(PULSAR_AUTH_PLUGIN_CLASS_NAME, authPluginClassName);
         configBuilder.set(PULSAR_AUTH_PARAM_MAP, authParams);
+        return this;
+    }
+
+    /**
+     * Sets a {@link CryptoKeyReader}. Configure the key reader to be used to decrypt the message
+     * payloads.
+     *
+     * @param cryptoKeyReader CryptoKeyReader object
+     * @return this PulsarSourceBuilder.
+     */
+    public PulsarSourceBuilder<OUT> setCryptoKeyReader(CryptoKeyReader cryptoKeyReader) {
+        this.cryptoKeyReader = checkNotNull(cryptoKeyReader);
         return this;
     }
 
@@ -543,12 +500,20 @@ public final class PulsarSourceBuilder<OUT> {
      */
     @SuppressWarnings("java:S3776")
     public PulsarSource<OUT> build() {
+
         // Ensure the topic subscriber for pulsar.
         checkNotNull(subscriber, "No topic names or topic pattern are provided.");
 
-        if (rangeGenerator == null) {
-            LOG.warn(
-                    "No range generator provided, we would use the FullRangeGenerator as the default range generator.");
+        SubscriptionType subscriptionType = configBuilder.get(PULSAR_SUBSCRIPTION_TYPE);
+        if (subscriptionType == SubscriptionType.Key_Shared) {
+            if (rangeGenerator == null) {
+                LOG.warn(
+                        "No range generator provided for key_shared subscription,"
+                                + " we would use the SplitRangeGenerator as the default range generator.");
+                this.rangeGenerator = new SplitRangeGenerator();
+            }
+        } else {
+            // Override the range generator.
             this.rangeGenerator = new FullRangeGenerator();
         }
 
@@ -565,20 +530,39 @@ public final class PulsarSourceBuilder<OUT> {
         }
 
         checkNotNull(deserializationSchema, "deserializationSchema should be set.");
+
+        // Enable transaction if the cursor auto commit is disabled for Key_Shared & Shared.
+        if (FALSE.equals(configBuilder.get(PULSAR_ENABLE_AUTO_ACKNOWLEDGE_MESSAGE))
+                && (subscriptionType == SubscriptionType.Key_Shared
+                        || subscriptionType == SubscriptionType.Shared)) {
+            LOG.info(
+                    "Pulsar cursor auto commit is disabled, make sure checkpoint is enabled "
+                            + "and your pulsar cluster is support the transaction.");
+            configBuilder.override(PULSAR_ENABLE_TRANSACTION, true);
+
+            if (!configBuilder.contains(PULSAR_READ_TRANSACTION_TIMEOUT)) {
+                LOG.warn(
+                        "The default pulsar transaction timeout is 3 hours, "
+                                + "make sure it was greater than your checkpoint interval.");
+            } else {
+                Long timeout = configBuilder.get(PULSAR_READ_TRANSACTION_TIMEOUT);
+                LOG.warn(
+                        "The configured transaction timeout is {} mille seconds, "
+                                + "make sure it was greater than your checkpoint interval.",
+                        timeout);
+            }
+        }
+
         // Schema evolution validation.
         if (Boolean.TRUE.equals(configBuilder.get(PULSAR_READ_SCHEMA_EVOLUTION))) {
             checkState(
                     deserializationSchema instanceof PulsarSchemaWrapper,
-                    "When enabling schema evolution, you must provide a Pulsar Schema in builder's setDeserializationSchema method.");
+                    "When enabling schema evolution, you must provide a Pulsar Schema in PulsarDeserializationSchema.");
         } else if (deserializationSchema instanceof PulsarSchemaWrapper) {
             LOG.info(
-                    "It seems like you are consuming messages by using Pulsar Schema."
-                            + " You can builder.enableSchemaEvolution() to enable schema evolution for better Pulsar Schema check."
-                            + " We would use bypass Schema check by default.");
-        }
-
-        if (pulsarCrypto == null) {
-            this.pulsarCrypto = PulsarCrypto.disabled();
+                    "It seems like you want to read message using Pulsar Schema."
+                            + " You can enableSchemaEvolution for using this feature."
+                            + " We would use Schema.BYTES as the default schema if you don't enable this option.");
         }
 
         if (!configBuilder.contains(PULSAR_CONSUMER_NAME)) {
@@ -591,14 +575,10 @@ public final class PulsarSourceBuilder<OUT> {
             }
         }
 
-        // Make sure they are serializable.
-        checkState(
-                isSerializable(deserializationSchema),
-                "PulsarDeserializationSchema isn't serializable");
+        // Since these implementations could be a lambda, make sure they are serializable.
         checkState(isSerializable(startCursor), "StartCursor isn't serializable");
         checkState(isSerializable(stopCursor), "StopCursor isn't serializable");
         checkState(isSerializable(rangeGenerator), "RangeGenerator isn't serializable");
-        checkState(isSerializable(pulsarCrypto), "PulsarCrypto isn't serializable");
 
         // Check builder configuration.
         SourceConfiguration sourceConfiguration =
@@ -612,7 +592,7 @@ public final class PulsarSourceBuilder<OUT> {
                 stopCursor,
                 boundedness,
                 deserializationSchema,
-                pulsarCrypto);
+                cryptoKeyReader);
     }
 
     // ------------- private helpers  --------------
@@ -623,25 +603,13 @@ public final class PulsarSourceBuilder<OUT> {
         return (PulsarSourceBuilder<T>) this;
     }
 
-    /** Topic name and topic pattern are conflict, make sure they are set only once. */
+    /** Topic name and topic pattern is conflict, make sure they are set only once. */
     private void ensureSubscriberIsNull(String attemptingSubscribeMode) {
         if (subscriber != null) {
             throw new IllegalStateException(
                     String.format(
-                            "Cannot use %s for consumption because a %s is already set for consumption",
+                            "Cannot use %s for consumption because a %s is already set for consumption.",
                             attemptingSubscribeMode, subscriber.getClass().getSimpleName()));
-        }
-    }
-
-    private void ensureSchemaTypeIsValid(Schema<?> schema) {
-        SchemaInfo info = schema.getSchemaInfo();
-        if (info.getType() == SchemaType.AUTO_CONSUME) {
-            throw new IllegalArgumentException(
-                    "Auto schema is only supported by providing a GenericRecordDeserializer");
-        }
-        if (info.getType() == SchemaType.AUTO_PUBLISH) {
-            throw new IllegalStateException(
-                    "Auto produce schema is not supported in consuming messages");
         }
     }
 }

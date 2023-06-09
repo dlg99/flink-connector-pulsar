@@ -20,23 +20,24 @@ package org.apache.flink.connector.pulsar.testutils.runtime.container;
 
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntime;
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntimeOperator;
+import org.apache.flink.util.DockerImageVersions;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PulsarContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.apache.flink.util.DockerImageVersions.PULSAR;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.testcontainers.containers.PulsarContainer.BROKER_HTTP_PORT;
 import static org.testcontainers.containers.PulsarContainer.BROKER_PORT;
-import static org.testcontainers.utility.DockerImageName.parse;
+import static org.testcontainers.containers.wait.strategy.Wait.forHttp;
 
 /**
  * {@link PulsarRuntime} implementation, use the TestContainers as the backend. We would start a
@@ -54,30 +55,16 @@ public class PulsarContainerRuntime implements PulsarRuntime {
     private static final String PULSAR_ADMIN_URL =
             String.format("http://%s:%d", PULSAR_INTERNAL_HOSTNAME, BROKER_HTTP_PORT);
 
-    private static final String CURRENT_VERSION = "2.11.0";
+    /**
+     * Create a pulsar container provider by a predefined version, this constance {@link
+     * DockerImageVersions#PULSAR} should be bumped after the new pulsar release.
+     */
+    private final PulsarContainer container = new PulsarContainer(DockerImageName.parse(PULSAR));
 
-    private final PulsarContainer container;
-    private final AtomicBoolean started;
-    private final Map<String, String> brokerConfigs;
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     private boolean boundFlink = false;
     private PulsarRuntimeOperator operator;
-
-    public PulsarContainerRuntime() {
-        this.container = new PulsarContainer(parse("apachepulsar/pulsar:" + CURRENT_VERSION));
-        this.started = new AtomicBoolean(false);
-        this.brokerConfigs = new HashMap<>();
-
-        brokerConfigs.put("acknowledgmentAtBatchIndexLevelEnabled", "true");
-        brokerConfigs.put("systemTopicEnabled", "true");
-        brokerConfigs.put("defaultNumberOfNamespaceBundles", "1");
-        brokerConfigs.put("allowAutoTopicCreation", "true");
-        brokerConfigs.put("allowAutoTopicCreationType", "partitioned");
-        brokerConfigs.put("defaultNumPartitions", "4");
-        brokerConfigs.put("enableBrokerSideSubscriptionPatternEvaluation", "true");
-        brokerConfigs.put("brokerDeleteInactiveTopicsEnabled", "false");
-        brokerConfigs.put("enableNonPersistentTopics", "true");
-    }
 
     public PulsarContainerRuntime bindWithFlinkContainer(GenericContainer<?> flinkContainer) {
         checkArgument(
@@ -93,26 +80,26 @@ public class PulsarContainerRuntime implements PulsarRuntime {
     }
 
     @Override
-    public PulsarRuntime withConfigs(Map<String, String> configs) {
-        brokerConfigs.putAll(configs);
-        return this;
-    }
-
-    @Override
-    public void startUp() throws Exception {
-        if (!started.compareAndSet(false, true)) {
+    public void startUp() {
+        boolean havenStartedBefore = started.compareAndSet(false, true);
+        if (!havenStartedBefore) {
             LOG.warn("You have started the Pulsar Container. We will skip this execution.");
             return;
         }
 
-        // Enable the transaction in Pulsar, this will add extra wait strategy.
-        container.withTransactions();
-        // Override the default standalone configuration by system environments.
-        brokerConfigs.forEach((key, value) -> container.withEnv("PULSAR_PREFIX_" + key, value));
-        // Waiting for the Pulsar broker and the transaction is ready after the container started.
-        // Override the default wait strategy in PulsarContainer because it doesn't allow setting
-        // the timeout.
-        container.withStartupTimeout(Duration.ofMinutes(5));
+        // Override the default configuration in container for enabling the Pulsar transaction.
+        container.withClasspathResourceMapping(
+                "docker/bootstrap.sh", "/pulsar/bin/bootstrap.sh", BindMode.READ_ONLY);
+        // Waiting for the Pulsar border is ready.
+        container.waitingFor(
+                forHttp(
+                                "/admin/v2/persistent/pulsar/system/transaction_coordinator_assign/partitions")
+                        .forPort(BROKER_HTTP_PORT)
+                        .forStatusCode(200)
+                        .withStartupTimeout(Duration.ofMinutes(5)));
+        // Set custom startup script.
+        container.withCommand("sh /pulsar/bin/bootstrap.sh");
+
         // Start the Pulsar Container.
         container.start();
         // Append the output to this runtime logger. Used for local debug purpose.
@@ -134,16 +121,20 @@ public class PulsarContainerRuntime implements PulsarRuntime {
     }
 
     @Override
-    public void tearDown() throws Exception {
-        if (operator != null) {
-            operator.close();
+    public void tearDown() {
+        try {
+            if (operator != null) {
+                operator.close();
+            }
+            container.stop();
+            started.compareAndSet(true, false);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
         }
-        container.stop();
-        started.compareAndSet(true, false);
     }
 
     @Override
     public PulsarRuntimeOperator operator() {
-        return checkNotNull(operator, "You should start this pulsar runtime first.");
+        return checkNotNull(operator, "You should start this pulsar container first.");
     }
 }

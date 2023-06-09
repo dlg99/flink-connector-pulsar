@@ -26,9 +26,11 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.connector.pulsar.common.config.PulsarOptions;
 import org.apache.flink.connector.pulsar.source.config.CursorVerification;
+import org.apache.flink.connector.pulsar.source.enumerator.cursor.StartCursor;
 
 import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
 import org.apache.pulsar.client.api.SubscriptionMode;
+import org.apache.pulsar.client.api.SubscriptionType;
 
 import java.time.Duration;
 import java.util.Map;
@@ -37,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 import static java.util.Collections.emptyMap;
 import static org.apache.flink.configuration.description.TextElement.code;
 import static org.apache.flink.configuration.description.TextElement.text;
-import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_STATS_INTERVAL_SECONDS;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.CONSUMER_CONFIG_PREFIX;
 import static org.apache.flink.connector.pulsar.source.PulsarSourceOptions.SOURCE_CONFIG_PREFIX;
 
@@ -76,7 +77,7 @@ public final class PulsarSourceOptions {
     public static final ConfigOption<Long> PULSAR_PARTITION_DISCOVERY_INTERVAL_MS =
             ConfigOptions.key(SOURCE_CONFIG_PREFIX + "partitionDiscoveryIntervalMs")
                     .longType()
-                    .defaultValue(Duration.ofMinutes(5).toMillis())
+                    .defaultValue(Duration.ofSeconds(30).toMillis())
                     .withDescription(
                             Description.builder()
                                     .text(
@@ -99,7 +100,14 @@ public final class PulsarSourceOptions {
                                             code("true"))
                                     .linebreak()
                                     .text(
-                                            "The source would use pulsar client's internal mechanism and commit cursor in a given interval.")
+                                            "The source would use pulsar client's internal mechanism and commit cursor in two ways.")
+                                    .list(
+                                            text(
+                                                    "For %s and %s subscription, the cursor would be committed once the message is consumed.",
+                                                    code("Key_Shared"), code("Shared")),
+                                            text(
+                                                    "For %s and %s subscription, the cursor would be committed in a given interval.",
+                                                    code("Exclusive"), code("Failover")))
                                     .build());
 
     public static final ConfigOption<Long> PULSAR_AUTO_COMMIT_CURSOR_INTERVAL =
@@ -114,24 +122,30 @@ public final class PulsarSourceOptions {
                                             " We would automatically commit the cursor using the given period (in ms).")
                                     .build());
 
-    public static final ConfigOption<Integer> PULSAR_FETCH_ONE_MESSAGE_TIME =
-            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "fetchOneMessageTime")
-                    .intType()
-                    .noDefaultValue()
+    public static final ConfigOption<Long> PULSAR_READ_TRANSACTION_TIMEOUT =
+            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "transactionTimeoutMillis")
+                    .longType()
+                    .defaultValue(Duration.ofHours(3).toMillis())
                     .withDescription(
                             Description.builder()
                                     .text(
-                                            "The time (in ms) for fetching one message from Pulsar. If time exceed and no message returned from Pulsar.")
+                                            "This option is used in %s or %s subscription.",
+                                            code("Shared"), code("Key_Shared"))
                                     .text(
-                                            " We would consider there is no record at the current topic partition and stop fetching until next switch.")
+                                            " You should configure this option when you do not enable the %s option.",
+                                            code("pulsar.source.enableAutoAcknowledgeMessage"))
                                     .linebreak()
                                     .text(
-                                            "It's not configured by default. We will use the remaining time in %s by default,",
-                                            code("pulsar.source.maxFetchTime"))
-                                    .text(" which may cause a long wait in small message rates.")
-                                    .text(
-                                            " Add this option in source builder avoiding waiting too long.")
+                                            "The value (in ms) should be greater than the checkpoint interval.")
                                     .build());
+
+    public static final ConfigOption<Long> PULSAR_DEFAULT_FETCH_TIME =
+            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "defaultFetchTime")
+                    .longType()
+                    .defaultValue(100L)
+                    .withDescription(
+                            "The time (in ms) for fetching messages from Pulsar. If time exceed and no message returned from Pulsar."
+                                    + " We would consider there is no record at the current topic and stop fetch until next switch.");
 
     public static final ConfigOption<Long> PULSAR_MAX_FETCH_TIME =
             ConfigOptions.key(SOURCE_CONFIG_PREFIX + "maxFetchTime")
@@ -174,6 +188,17 @@ public final class PulsarSourceOptions {
                                             " A possible solution is to adjust the retention settings in Pulsar or ignoring the check result.")
                                     .build());
 
+    public static final ConfigOption<Boolean> PULSAR_READ_SCHEMA_EVOLUTION =
+            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "enableSchemaEvolution")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "If you enable this option, we would consume and deserialize the message by using Pulsar's %s.",
+                                            code("Schema"))
+                                    .build());
+
     public static final ConfigOption<Boolean> PULSAR_ALLOW_KEY_SHARED_OUT_OF_ORDER_DELIVERY =
             ConfigOptions.key(SOURCE_CONFIG_PREFIX + "allowKeySharedOutOfOrderDelivery")
                     .booleanType()
@@ -187,49 +212,6 @@ public final class PulsarSourceOptions {
                                     .linebreak()
                                     .text(
                                             "In this case, a single consumer will still receive all the keys, but they may be coming in different orders.")
-                                    .build());
-
-    public static final ConfigOption<Boolean> PULSAR_READ_SCHEMA_EVOLUTION =
-            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "enableSchemaEvolution")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "If you enable this option and use %s,"
-                                                    + " we would consume and deserialize the message by using Pulsar's %s interface with extra schema evolution check.",
-                                            code(
-                                                    "PulsarSourceBuilder.setDeserializationSchema(Schema)"),
-                                            code("Schema"))
-                                    .build());
-
-    public static final ConfigOption<Boolean> PULSAR_ENABLE_SOURCE_METRICS =
-            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "enableMetrics")
-                    .booleanType()
-                    .defaultValue(true)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "The metrics from Pulsar Consumer are only exposed if you enable this option.")
-                                    .text(
-                                            "You should set the %s to a positive value if you enable this option.",
-                                            code(PULSAR_STATS_INTERVAL_SECONDS.key()))
-                                    .build());
-
-    public static final ConfigOption<Boolean> PULSAR_RESET_SUBSCRIPTION_CURSOR =
-            ConfigOptions.key(SOURCE_CONFIG_PREFIX + "resetSubscriptionCursor")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "The %s in connector is used to create the initial subscription.",
-                                            code("StartCursor"))
-                                    .text(
-                                            " Enable this option will reset the start cursor in subscription")
-                                    .text(
-                                            " by using %s everytime you start the application without the checkpoint.",
-                                            code("StartCursor"))
                                     .build());
 
     ///////////////////////////////////////////////////////////////////////////////
@@ -250,6 +232,23 @@ public final class PulsarSourceOptions {
                                             " This argument is required when constructing the consumer.")
                                     .build());
 
+    public static final ConfigOption<SubscriptionType> PULSAR_SUBSCRIPTION_TYPE =
+            ConfigOptions.key(CONSUMER_CONFIG_PREFIX + "subscriptionType")
+                    .enumType(SubscriptionType.class)
+                    .defaultValue(SubscriptionType.Shared)
+                    .withDescription(
+                            Description.builder()
+                                    .text("Subscription type.")
+                                    .linebreak()
+                                    .linebreak()
+                                    .text("Four subscription types are available:")
+                                    .list(
+                                            text("Exclusive"),
+                                            text("Failover"),
+                                            text("Shared"),
+                                            text("Key_Shared"))
+                                    .build());
+
     public static final ConfigOption<SubscriptionMode> PULSAR_SUBSCRIPTION_MODE =
             ConfigOptions.key(CONSUMER_CONFIG_PREFIX + "subscriptionMode")
                     .enumType(SubscriptionMode.class)
@@ -265,18 +264,6 @@ public final class PulsarSourceOptions {
                                             text(
                                                     "%s: Lightweight subscription mode that doesn't have a durable cursor associated",
                                                     code("NonDurable")))
-                                    .build());
-
-    public static final ConfigOption<Map<String, String>> PULSAR_SUBSCRIPTION_PROPERTIES =
-            ConfigOptions.key(CONSUMER_CONFIG_PREFIX + "subscriptionProperties")
-                    .mapType()
-                    .noDefaultValue()
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "Subscription properties is an optional attribute, which can be set when subscribing to topic.")
-                                    .text(
-                                            " These properties cannot be modified. We can only delete the subscription and create it again.")
                                     .build());
 
     public static final ConfigOption<Integer> PULSAR_RECEIVER_QUEUE_SIZE =
@@ -363,7 +350,7 @@ public final class PulsarSourceOptions {
                                             "By default, the acknowledge timeout is disabled and that means that messages delivered to a consumer will not be re-delivered unless the consumer crashes.")
                                     .linebreak()
                                     .text(
-                                            "When acknowledgement timeout being enabled, if a message is not acknowledged within the specified timeout it will be re-delivered to the consumer.")
+                                            "When acknowledgement timeout being enabled, if a message is not acknowledged within the specified timeout it will be re-delivered to the consumer (possibly to a different consumer in case of a shared subscription).")
                                     .build());
 
     public static final ConfigOption<Long> PULSAR_TICK_DURATION_MILLIS =
@@ -386,10 +373,15 @@ public final class PulsarSourceOptions {
                     .withDescription(
                             Description.builder()
                                     .text(
-                                            "Priority level for a consumer to which a broker gives more priorities while dispatching messages in the subscription.")
+                                            "Priority level for a consumer to which a broker gives more priorities while dispatching messages in the shared subscription type.")
                                     .linebreak()
                                     .text(
                                             "The broker follows descending priorities. For example, 0=max-priority, 1, 2,...")
+                                    .linebreak()
+                                    .text(
+                                            "In shared subscription mode, the broker first dispatches messages to the consumers on the highest priority level if they have permits.")
+                                    .text(
+                                            " Otherwise, the broker considers consumers on the next priority level.")
                                     .linebreak()
                                     .linebreak()
                                     .text("Example 1")
@@ -533,7 +525,7 @@ public final class PulsarSourceOptions {
                                             code("readCompacted"))
                                     .linebreak()
                                     .text(
-                                            "Attempting to enable it on subscriptions to non-persistent topics leads to a subscription call throwing a %s.",
+                                            "Attempting to enable it on subscriptions to non-persistent topics or on shared subscriptions leads to a subscription call throwing a %s.",
                                             code("PulsarClientException"))
                                     .build());
 
@@ -611,20 +603,4 @@ public final class PulsarSourceOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription("Enable pooling of messages and the underlying data buffers.");
-
-    public static final ConfigOption<Boolean> PULSAR_AUTO_SCALED_RECEIVER_QUEUE_SIZE_ENABLED =
-            ConfigOptions.key(CONSUMER_CONFIG_PREFIX + "autoScaledReceiverQueueSizeEnabled")
-                    .booleanType()
-                    .defaultValue(true)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "This option is enabled by default. The consumer receiver queue size is initialized with 1,")
-                                    .text(
-                                            " and will double itself until it reaches the value set by %s.",
-                                            code("pulsar.consumer.receiverQueueSize"))
-                                    .linebreak()
-                                    .text(
-                                            "The feature should be able to reduce client memory usage.")
-                                    .build());
 }

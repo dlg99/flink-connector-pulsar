@@ -25,18 +25,13 @@ import org.apache.flink.api.connector.sink2.Sink.InitContext;
 import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.pulsar.common.crypto.PulsarCrypto;
 import org.apache.flink.connector.pulsar.sink.committer.PulsarCommittable;
 import org.apache.flink.connector.pulsar.sink.config.SinkConfiguration;
-import org.apache.flink.connector.pulsar.sink.writer.context.PulsarSinkContext;
 import org.apache.flink.connector.pulsar.sink.writer.delayer.FixedMessageDelayer;
 import org.apache.flink.connector.pulsar.sink.writer.delayer.MessageDelayer;
 import org.apache.flink.connector.pulsar.sink.writer.router.RoundRobinTopicRouter;
-import org.apache.flink.connector.pulsar.sink.writer.router.TopicRouter;
-import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSchemaWrapper;
 import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSerializationSchema;
-import org.apache.flink.connector.pulsar.sink.writer.topic.MetadataListener;
-import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
+import org.apache.flink.connector.pulsar.sink.writer.topic.register.FixedTopicRegister;
 import org.apache.flink.connector.pulsar.testutils.PulsarTestSuiteBase;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
@@ -49,20 +44,20 @@ import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
 import org.apache.flink.util.UserCodeClassLoader;
 
 import org.apache.pulsar.client.api.transaction.TransactionCoordinatorClient;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.Collection;
-import java.util.List;
 import java.util.OptionalLong;
 
 import static java.util.Collections.singletonList;
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
 import static org.apache.flink.connector.base.DeliveryGuarantee.EXACTLY_ONCE;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_SCHEMA_EVOLUTION;
+import static org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSerializationSchema.pulsarSchema;
 import static org.apache.pulsar.client.api.Schema.STRING;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Unit tests for {@link PulsarWriter}. */
 class PulsarWriterTest extends PulsarTestSuiteBase {
@@ -71,39 +66,20 @@ class PulsarWriterTest extends PulsarTestSuiteBase {
 
     @ParameterizedTest
     @EnumSource(DeliveryGuarantee.class)
-    void writeMessagesToPulsar(DeliveryGuarantee guarantee) throws Exception {
-        String topic = "writer-" + randomAlphabetic(10);
+    void writeMessages(DeliveryGuarantee guarantee) throws Exception {
+        String topic = randomAlphabetic(10);
         operator().createTopic(topic, 8);
-        MetadataListener listener = new MetadataListener(singletonList(topic));
 
-        writeMessageAndVerify(guarantee, listener, topic);
-    }
-
-    @Test
-    void writeMessagesToPulsarWithTopicAutoCreation() throws Exception {
-        String topic = "non-existed-topic-" + randomAlphabetic(10);
-        MetadataListener listener = new MetadataListener();
-
-        writeMessageAndVerify(DeliveryGuarantee.AT_LEAST_ONCE, listener, topic);
-    }
-
-    private void writeMessageAndVerify(
-            DeliveryGuarantee guarantee, MetadataListener listener, String topic) throws Exception {
         SinkConfiguration configuration = sinkConfiguration(guarantee);
-        TopicRouter<String> router = new DynamicTopicRouter<>(configuration, topic);
-        PulsarSerializationSchema<String> schema = new PulsarSchemaWrapper<>(STRING);
+        PulsarSerializationSchema<String> schema = pulsarSchema(STRING);
+        FixedTopicRegister listener = new FixedTopicRegister(singletonList(topic));
+        RoundRobinTopicRouter<String> router = new RoundRobinTopicRouter<>(configuration);
         FixedMessageDelayer<String> delayer = MessageDelayer.never();
         MockInitContext initContext = new MockInitContext();
 
         PulsarWriter<String> writer =
                 new PulsarWriter<>(
-                        configuration,
-                        schema,
-                        listener,
-                        router,
-                        delayer,
-                        PulsarCrypto.disabled(),
-                        initContext);
+                        configuration, schema, listener, router, delayer, null, initContext);
 
         writer.flush(false);
         writer.prepareCommit();
@@ -126,7 +102,7 @@ class PulsarWriterTest extends PulsarTestSuiteBase {
         }
 
         String consumedMessage = operator().receiveMessage(topic, STRING).getValue();
-        assertThat(consumedMessage).isEqualTo(message);
+        assertEquals(consumedMessage, message);
     }
 
     private SinkConfiguration sinkConfiguration(DeliveryGuarantee deliveryGuarantee) {
@@ -134,28 +110,6 @@ class PulsarWriterTest extends PulsarTestSuiteBase {
         configuration.set(PULSAR_WRITE_SCHEMA_EVOLUTION, true);
 
         return new SinkConfiguration(configuration);
-    }
-
-    private static class DynamicTopicRouter<IN> implements TopicRouter<IN> {
-        private static final long serialVersionUID = -2855742316603280628L;
-
-        private final RoundRobinTopicRouter<IN> robinTopicRouter;
-        private final String topic;
-
-        public DynamicTopicRouter(SinkConfiguration configuration, String topic) {
-            this.robinTopicRouter = new RoundRobinTopicRouter<>(configuration);
-            this.topic = topic;
-        }
-
-        @Override
-        public TopicPartition route(
-                IN in, String key, List<TopicPartition> partitions, PulsarSinkContext context) {
-            if (partitions.isEmpty()) {
-                return new TopicPartition(topic);
-            } else {
-                return robinTopicRouter.route(in, key, partitions, context);
-            }
-        }
     }
 
     private static class MockInitContext implements InitContext {
@@ -198,11 +152,6 @@ class PulsarWriterTest extends PulsarTestSuiteBase {
         @Override
         public int getNumberOfParallelSubtasks() {
             return 1;
-        }
-
-        @Override
-        public int getAttemptNumber() {
-            return 0;
         }
 
         @Override

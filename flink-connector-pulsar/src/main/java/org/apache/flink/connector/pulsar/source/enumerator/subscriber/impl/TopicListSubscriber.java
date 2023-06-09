@@ -18,57 +18,70 @@
 
 package org.apache.flink.connector.pulsar.source.enumerator.subscriber.impl;
 
+import org.apache.flink.connector.pulsar.common.request.PulsarAdminRequest;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicMetadata;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.RangeGenerator.KeySharedMode;
 
-import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.flink.shaded.guava30.com.google.common.collect.ImmutableList;
+
 import org.apache.pulsar.common.naming.TopicName;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.isPartition;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.isPartitioned;
 
 /** the implements of consuming multiple topics. */
 public class TopicListSubscriber extends BasePulsarSubscriber {
     private static final long serialVersionUID = 6473918213832993116L;
 
-    private final Set<String> partitions;
-    private final Set<String> fullTopicNames;
+    private final List<String> topics;
+    private final List<String> partitions;
 
-    public TopicListSubscriber(List<String> fullTopicNameOrPartitions) {
-        this.partitions = new HashSet<>();
-        this.fullTopicNames = new HashSet<>();
+    public TopicListSubscriber(List<String> topics) {
+        ImmutableList.Builder<String> topicsBuilder = ImmutableList.builder();
+        ImmutableList.Builder<String> partitionsBuilder = ImmutableList.builder();
 
-        for (String fullTopicNameOrPartition : fullTopicNameOrPartitions) {
-            if (isPartition(fullTopicNameOrPartition)) {
-                this.partitions.add(fullTopicNameOrPartition);
+        for (String topic : topics) {
+            if (isPartitioned(topic)) {
+                partitionsBuilder.add(topic);
             } else {
-                this.fullTopicNames.add(fullTopicNameOrPartition);
+                topicsBuilder.add(topic);
             }
         }
+
+        this.topics = topicsBuilder.build();
+        this.partitions = partitionsBuilder.build();
     }
 
     @Override
     public Set<TopicPartition> getSubscribedTopicPartitions(
-            RangeGenerator generator, int parallelism) throws PulsarAdminException {
+            PulsarAdminRequest metadataRequest, RangeGenerator rangeGenerator, int parallelism) {
+        Set<TopicPartition> results = new HashSet<>();
 
         // Query topics from Pulsar.
-        Set<TopicPartition> results = createTopicPartitions(fullTopicNames, generator, parallelism);
+        for (String topic : topics) {
+            TopicMetadata metadata = queryTopicMetadata(metadataRequest, topic);
+            List<TopicRange> ranges = rangeGenerator.range(metadata, parallelism);
+            RangeGenerator.KeySharedMode mode = rangeGenerator.keyShareMode(metadata, parallelism);
 
-        // Query partitions from Pulsar.
+            results.addAll(toTopicPartitions(metadata, ranges, mode));
+        }
+
         for (String partition : partitions) {
             TopicName topicName = TopicName.get(partition);
             String name = topicName.getPartitionedTopicName();
             int index = topicName.getPartitionIndex();
-            TopicMetadata metadata = queryTopicMetadata(partition);
-            if (metadata != null) {
-                List<TopicRange> ranges = generator.range(metadata, parallelism);
-                results.add(new TopicPartition(name, index, ranges));
-            }
+
+            TopicMetadata metadata = queryTopicMetadata(metadataRequest, name);
+            List<TopicRange> ranges = rangeGenerator.range(metadata, parallelism);
+            RangeGenerator.KeySharedMode mode = rangeGenerator.keyShareMode(metadata, parallelism);
+
+            results.addAll(toTopicPartitions(name, index, ranges, mode));
         }
 
         return results;

@@ -19,28 +19,31 @@
 package org.apache.flink.connector.pulsar.sink;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.pulsar.common.config.PulsarConfigBuilder;
 import org.apache.flink.connector.pulsar.common.config.PulsarOptions;
-import org.apache.flink.connector.pulsar.common.crypto.PulsarCrypto;
 import org.apache.flink.connector.pulsar.sink.config.SinkConfiguration;
 import org.apache.flink.connector.pulsar.sink.writer.delayer.MessageDelayer;
 import org.apache.flink.connector.pulsar.sink.writer.router.TopicRouter;
 import org.apache.flink.connector.pulsar.sink.writer.router.TopicRoutingMode;
 import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSchemaWrapper;
 import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSerializationSchema;
-import org.apache.flink.connector.pulsar.sink.writer.serializer.PulsarSerializationSchemaWrapper;
-import org.apache.flink.connector.pulsar.sink.writer.topic.MetadataListener;
+import org.apache.flink.connector.pulsar.sink.writer.topic.TopicExtractor;
+import org.apache.flink.connector.pulsar.sink.writer.topic.TopicRegister;
+import org.apache.flink.connector.pulsar.sink.writer.topic.register.DynamicTopicRegister;
+import org.apache.flink.connector.pulsar.sink.writer.topic.register.EmptyTopicRegister;
+import org.apache.flink.connector.pulsar.sink.writer.topic.register.FixedTopicRegister;
 
-import org.apache.pulsar.client.api.ProducerCryptoFailureAction;
+import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.Schema;
-import org.apache.pulsar.common.schema.KeyValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -52,15 +55,16 @@ import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULS
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_AUTH_PLUGIN_CLASS_NAME;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_ENABLE_TRANSACTION;
 import static org.apache.flink.connector.pulsar.common.config.PulsarOptions.PULSAR_SERVICE_URL;
-import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_PRODUCER_CRYPTO_FAILURE_ACTION;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_ENCRYPTION_KEYS;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_PRODUCER_NAME;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SEND_TIMEOUT_MS;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS;
+import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_SINK_TOPIC_AUTO_CREATION;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_DELIVERY_GUARANTEE;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_SCHEMA_EVOLUTION;
 import static org.apache.flink.connector.pulsar.sink.PulsarSinkOptions.PULSAR_WRITE_TRANSACTION_TIMEOUT;
 import static org.apache.flink.connector.pulsar.sink.config.PulsarSinkConfigUtils.SINK_CONFIG_VALIDATOR;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.distinctTopics;
-import static org.apache.flink.util.InstantiationUtil.isSerializable;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
@@ -77,7 +81,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  *     .setServiceUrl(operator().serviceUrl())
  *     .setAdminUrl(operator().adminUrl())
  *     .setTopics(topic)
- *     .setSerializationSchema(Schema.STRING)
+ *     .setSerializationSchema(PulsarSerializationSchema.pulsarSchema(Schema.STRING))
  *     .build();
  * }</pre>
  *
@@ -95,7 +99,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  *     .setServiceUrl(operator().serviceUrl())
  *     .setAdminUrl(operator().adminUrl())
  *     .setTopics(topic)
- *     .setSerializationSchema(Schema.STRING)
+ *     .setSerializationSchema(PulsarSerializationSchema.pulsarSchema(Schema.STRING))
  *     .setDeliveryGuarantee(deliveryGuarantee)
  *     .build();
  * }</pre>
@@ -110,11 +114,12 @@ public class PulsarSinkBuilder<IN> {
     private final PulsarConfigBuilder configBuilder;
 
     private PulsarSerializationSchema<IN> serializationSchema;
-    private MetadataListener metadataListener;
+    private TopicRegister<IN> topicRegister;
     private TopicRoutingMode topicRoutingMode;
     private TopicRouter<IN> topicRouter;
     private MessageDelayer<IN> messageDelayer;
-    private PulsarCrypto pulsarCrypto;
+    @Nullable private CryptoKeyReader cryptoKeyReader;
+    private final List<String> encryptionKeys = new ArrayList<>();
 
     // private builder constructor.
     PulsarSinkBuilder() {
@@ -171,10 +176,26 @@ public class PulsarSinkBuilder<IN> {
      * @return this PulsarSinkBuilder.
      */
     public PulsarSinkBuilder<IN> setTopics(List<String> topics) {
-        checkState(metadataListener == null, "setTopics couldn't be set twice.");
+        checkState(topicRegister == null, "setTopics couldn't be set twice.");
         // Making sure the topic should be distinct.
         List<String> topicSet = distinctTopics(topics);
-        this.metadataListener = new MetadataListener(topicSet);
+        if (topicSet.isEmpty()) {
+            this.topicRegister = new EmptyTopicRegister<>();
+        } else {
+            this.topicRegister = new FixedTopicRegister<>(topicSet);
+        }
+        return this;
+    }
+
+    /**
+     * Set a dynamic topic extractor for extracting the topic information.
+     *
+     * @return this PulsarSinkBuilder.
+     */
+    public PulsarSinkBuilder<IN> setTopics(TopicExtractor<IN> extractor) {
+        checkState(topicRegister == null, "setTopics couldn't be set twice.");
+        this.topicRegister = new DynamicTopicRegister<>(extractor);
+
         return this;
     }
 
@@ -221,54 +242,6 @@ public class PulsarSinkBuilder<IN> {
     }
 
     /**
-     * Send messages to Pulsar by using the flink's {@link SerializationSchema}. It would serialize
-     * the message into a byte array and send it to Pulsar with {@link Schema#BYTES}.
-     */
-    public <T extends IN> PulsarSinkBuilder<T> setSerializationSchema(
-            SerializationSchema<T> serializationSchema) {
-        return setSerializationSchema(new PulsarSerializationSchemaWrapper<>(serializationSchema));
-    }
-
-    /**
-     * Send messages to Pulsar by using the Pulsar {@link Schema} instance. It would serialize the
-     * message into a byte array and send it to Pulsar with {@link Schema#BYTES}. You can directly
-     * use the Schema you provided by enabling the {@link #enableSchemaEvolution()}.
-     *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#primitive-type">primitive
-     * types</a> here.
-     */
-    public <T extends IN> PulsarSinkBuilder<T> setSerializationSchema(Schema<T> schema) {
-        return setSerializationSchema(new PulsarSchemaWrapper<>(schema));
-    }
-
-    /**
-     * Send messages to Pulsar by using the Pulsar {@link Schema} instance. It would serialize the
-     * message into a byte array and send it to Pulsar with {@link Schema#BYTES}. You can directly
-     * use the Schema you provided by enabling the {@link #enableSchemaEvolution()}.
-     *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#struct">struct types</a> here.
-     */
-    public <T extends IN> PulsarSinkBuilder<T> setSerializationSchema(
-            Schema<T> schema, Class<T> typeClass) {
-        return setSerializationSchema(new PulsarSchemaWrapper<>(schema, typeClass));
-    }
-
-    /**
-     * Send messages to Pulsar by using the Pulsar {@link Schema} instance. It would serialize the
-     * message into a byte array and send it to Pulsar with {@link Schema#BYTES}. You can directly
-     * use the Schema you provided by enabling the {@link #enableSchemaEvolution()}.
-     *
-     * <p>We only support <a
-     * href="https://pulsar.apache.org/docs/en/schema-understand/#keyvalue">keyvalue types</a> here.
-     */
-    public <K, V, T extends IN> PulsarSinkBuilder<T> setSerializationSchema(
-            Schema<KeyValue<K, V>> schema, Class<K> keyClass, Class<V> valueClass) {
-        return setSerializationSchema(new PulsarSchemaWrapper<>(schema, keyClass, valueClass));
-    }
-
-    /**
      * Sets the {@link PulsarSerializationSchema} that transforms incoming records to bytes.
      *
      * @param serializationSchema Pulsar specified serialize logic.
@@ -295,8 +268,7 @@ public class PulsarSinkBuilder<IN> {
     /**
      * Set a message delayer for enable Pulsar message delay delivery.
      *
-     * @param messageDelayer The delayer which would defined when to send the message to the
-     *     consumer.
+     * @param messageDelayer The delayer which would defined when to send the message to consumer.
      * @return this PulsarSinkBuilder.
      */
     public PulsarSinkBuilder<IN> delaySendingMessage(MessageDelayer<IN> messageDelayer) {
@@ -305,16 +277,52 @@ public class PulsarSinkBuilder<IN> {
     }
 
     /**
-     * Sets a {@link PulsarCrypto}. Configure the key reader and keys to be used to encrypt the
-     * message payloads.
+     * Sets a {@link CryptoKeyReader}. Configure the key reader to be used to encrypt the message
+     * payloads.
      *
-     * @param pulsarCrypto PulsarCrypto object.
+     * @param cryptoKeyReader CryptoKeyReader object.
      * @return this PulsarSinkBuilder.
      */
-    public PulsarSinkBuilder<IN> setPulsarCrypto(
-            PulsarCrypto pulsarCrypto, ProducerCryptoFailureAction action) {
-        this.pulsarCrypto = checkNotNull(pulsarCrypto);
-        configBuilder.set(PULSAR_PRODUCER_CRYPTO_FAILURE_ACTION, action);
+    public PulsarSinkBuilder<IN> setCryptoKeyReader(CryptoKeyReader cryptoKeyReader) {
+        this.cryptoKeyReader = checkNotNull(cryptoKeyReader);
+        return this;
+    }
+
+    /**
+     * Add public encryption key, used by producer to encrypt the data key.
+     *
+     * <p>At the time of producer creation, Pulsar client checks if there are keys added to
+     * encryptionKeys. If keys are found, a callback {@link CryptoKeyReader#getPrivateKey(String,
+     * Map)} and {@link CryptoKeyReader#getPublicKey(String, Map)} is invoked against each key to
+     * load the values of the key. Application should implement this callback to return the key in
+     * pkcs8 format. If compression is enabled, message is encrypted after compression. If batch
+     * messaging is enabled, the batched message is encrypted.
+     *
+     * @param keys Encryption keys.
+     * @return this PulsarSinkBuilder.
+     */
+    public PulsarSinkBuilder<IN> setEncryptionKeys(String... keys) {
+        this.encryptionKeys.addAll(Arrays.asList(keys));
+        return this;
+    }
+
+    /**
+     * Pulsar sink disable the topic creation if the sink topic doesn't exist. You should explicitly
+     * set the default partition size for enabling topic creation. Make sure you have the authority
+     * on the given Pulsar admin token.
+     *
+     * @param partitionSize The partition size used on topic creation. It should be above to zero.
+     *     <ul>
+     *       <li>0: we would create a non-partitioned topic.
+     *       <li>above 0: we would create a partitioned topic with the given size.
+     *     </ul>
+     *
+     * @return this PulsarSinkBuilder.
+     */
+    public PulsarSinkBuilder<IN> enableTopicAutoCreation(int partitionSize) {
+        checkArgument(partitionSize >= 0);
+        configBuilder.set(PULSAR_SINK_TOPIC_AUTO_CREATION, true);
+        configBuilder.set(PULSAR_SINK_DEFAULT_TOPIC_PARTITIONS, partitionSize);
         return this;
     }
 
@@ -427,31 +435,27 @@ public class PulsarSinkBuilder<IN> {
         }
 
         checkNotNull(serializationSchema, "serializationSchema must be set.");
-        // Schema evolution validation.
-        if (Boolean.TRUE.equals(configBuilder.get(PULSAR_WRITE_SCHEMA_EVOLUTION))) {
-            checkState(
-                    serializationSchema instanceof PulsarSchemaWrapper,
-                    "When enabling schema evolution, you must provide a Pulsar Schema in builder's setSerializationSchema method.");
-        } else if (serializationSchema instanceof PulsarSchemaWrapper) {
+        if (serializationSchema instanceof PulsarSchemaWrapper
+                && !Boolean.TRUE.equals(configBuilder.get(PULSAR_WRITE_SCHEMA_EVOLUTION))) {
             LOG.info(
-                    "It seems like you are sending messages by using Pulsar Schema."
-                            + " You can builder.enableSchemaEvolution() to enable schema evolution for better Pulsar Schema check."
-                            + " We would use bypass Schema check by default.");
+                    "It seems like you want to send message in Pulsar Schema."
+                            + " You can enableSchemaEvolution for using this feature."
+                            + " We would use Schema.BYTES as the default schema if you don't enable this option.");
         }
 
         // Topic metadata listener validation.
-        if (metadataListener == null) {
+        if (topicRegister == null) {
             if (topicRouter == null) {
                 throw new NullPointerException(
                         "No topic names or custom topic router are provided.");
             } else {
                 LOG.warn(
                         "No topic set has been provided, make sure your custom topic router support empty topic set.");
-                this.metadataListener = new MetadataListener();
+                this.topicRegister = new EmptyTopicRegister<>();
             }
         }
 
-        // Topic routing mode validation.
+        // Topic routing mode validate.
         if (topicRoutingMode == null) {
             LOG.info("No topic routing mode has been chosen. We use round-robin mode as default.");
             this.topicRoutingMode = TopicRoutingMode.ROUND_ROBIN;
@@ -461,16 +465,12 @@ public class PulsarSinkBuilder<IN> {
             this.messageDelayer = MessageDelayer.never();
         }
 
-        if (pulsarCrypto == null) {
-            this.pulsarCrypto = PulsarCrypto.disabled();
+        // Add the encryption keys if user provides one.
+        if (cryptoKeyReader != null) {
+            checkArgument(
+                    !encryptionKeys.isEmpty(), "You should provide at least on encryption key.");
+            configBuilder.set(PULSAR_ENCRYPTION_KEYS, encryptionKeys);
         }
-
-        // Make sure they are serializable.
-        checkState(
-                isSerializable(serializationSchema),
-                "PulsarSerializationSchema isn't serializable");
-        checkState(isSerializable(messageDelayer), "MessageDelayer isn't serializable");
-        checkState(isSerializable(pulsarCrypto), "PulsarCrypto isn't serializable");
 
         // This is an unmodifiable configuration for Pulsar.
         // We don't use Pulsar's built-in configure classes for compatible requirement.
@@ -480,16 +480,16 @@ public class PulsarSinkBuilder<IN> {
         return new PulsarSink<>(
                 sinkConfiguration,
                 serializationSchema,
-                metadataListener,
+                topicRegister,
                 topicRoutingMode,
                 topicRouter,
                 messageDelayer,
-                pulsarCrypto);
+                cryptoKeyReader);
     }
 
     // ------------- private helpers  --------------
 
-    /** Helper method for java compiler recognizes the generic type. */
+    /** Helper method for java compiler recognize the generic type. */
     @SuppressWarnings("unchecked")
     private <T extends IN> PulsarSinkBuilder<T> specialized() {
         return (PulsarSinkBuilder<T>) this;

@@ -18,14 +18,13 @@
 
 package org.apache.flink.connector.pulsar.source.enumerator.subscriber;
 
+import org.apache.flink.connector.pulsar.common.request.PulsarAdminRequest;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
 import org.apache.flink.connector.pulsar.source.enumerator.topic.range.FullRangeGenerator;
 import org.apache.flink.connector.pulsar.testutils.PulsarTestSuiteBase;
 
-import org.apache.pulsar.common.naming.TopicName;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -39,183 +38,172 @@ import static org.apache.flink.connector.pulsar.source.enumerator.subscriber.Pul
 import static org.apache.flink.connector.pulsar.source.enumerator.subscriber.PulsarSubscriber.getTopicPatternSubscriber;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.topicName;
 import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicNameUtils.topicNameWithPartition;
+import static org.apache.flink.connector.pulsar.source.enumerator.topic.TopicRange.createFullRange;
 import static org.apache.pulsar.client.api.RegexSubscriptionMode.AllTopics;
-import static org.apache.pulsar.client.api.RegexSubscriptionMode.NonPersistentOnly;
-import static org.apache.pulsar.client.api.RegexSubscriptionMode.PersistentOnly;
-import static org.apache.pulsar.common.naming.TopicDomain.non_persistent;
-import static org.apache.pulsar.common.partition.PartitionedTopicMetadata.NON_PARTITIONED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Unit tests for {@link PulsarSubscriber}. */
 class PulsarSubscriberTest extends PulsarTestSuiteBase {
 
-    private final String topic1 =
-            topicName("flink/regex/pulsar-subscriber-topic-" + randomAlphanumeric(4));
-    private final String topic2 =
-            topicName("flink/regex/pulsar-subscriber-pattern-topic-" + randomAlphanumeric(4));
-    private final String topic3 =
-            topicName("flink/regex/pulsar-subscriber-topic-2-" + randomAlphanumeric(4));
-    private final String topic4 =
-            topicName(
-                    "flink/regex/pulsar-subscriber-non-partitioned-topic-" + randomAlphanumeric(4));
-    private final String topic5 =
-            topicName(
-                    "flink/regex/pulsar-subscriber-non-partitioned-topic-2-"
-                            + randomAlphanumeric(4));
-    private final String topic6 =
-            topicName("pulsar-subscriber-simple-topic-" + randomAlphanumeric(4));
-    private final String topic7 =
-            TopicName.get(
-                            non_persistent.value(),
-                            "public",
-                            "default",
-                            "pulsar-subscriber-simple-topic-2-" + randomAlphanumeric(4))
-                    .toString();
+    private final String topic1 = topicName("topic-" + randomAlphanumeric(4));
+    private final String topic2 = topicName("pattern-topic-" + randomAlphanumeric(4));
+    private final String topic3 = topicName("topic2-" + randomAlphanumeric(4));
+    private final String topic4 = topicName("non-partitioned-topic-" + randomAlphanumeric(4));
+    private final String topic5 = topicName("non-partitioned-topic2-" + randomAlphanumeric(4));
 
     private static final int NUM_PARTITIONS_PER_TOPIC = 5;
     private static final int NUM_PARALLELISM = 10;
 
     @BeforeAll
-    void setUp() throws Exception {
-        operator().createNamespace("flink/regex");
-
+    void setUp() {
         operator().createTopic(topic1, NUM_PARTITIONS_PER_TOPIC);
         operator().createTopic(topic2, NUM_PARTITIONS_PER_TOPIC);
         operator().createTopic(topic3, NUM_PARTITIONS_PER_TOPIC);
-        operator().createTopic(topic4, NON_PARTITIONED);
-        operator().createTopic(topic5, NON_PARTITIONED);
-        operator().createTopic(topic6, NUM_PARTITIONS_PER_TOPIC);
-        operator().createTopic(topic7, NUM_PARTITIONS_PER_TOPIC);
+        operator().createTopic(topic4, 0);
+        operator().createTopic(topic5, 0);
     }
 
     @AfterAll
-    void tearDown() throws Exception {
+    void tearDown() {
         operator().deleteTopic(topic1);
         operator().deleteTopic(topic2);
         operator().deleteTopic(topic3);
         operator().deleteTopic(topic4);
         operator().deleteTopic(topic5);
-        operator().deleteTopic(topic6);
     }
 
     @Test
-    void topicListSubscriber() throws Exception {
+    void topicListSubscriber() {
+        PulsarAdminRequest adminRequest =
+                new PulsarAdminRequest(operator().admin(), operator().config());
         PulsarSubscriber subscriber = getTopicListSubscriber(Arrays.asList(topic1, topic2));
-        subscriber.open(operator().client(), operator().admin());
-
         Set<TopicPartition> topicPartitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
+                subscriber.getSubscribedTopicPartitions(
+                        adminRequest, new FullRangeGenerator(), NUM_PARALLELISM);
         Set<TopicPartition> expectedPartitions = new HashSet<>();
 
         for (int i = 0; i < NUM_PARTITIONS_PER_TOPIC; i++) {
-            expectedPartitions.add(new TopicPartition(topic1, i));
-            expectedPartitions.add(new TopicPartition(topic2, i));
+            expectedPartitions.add(new TopicPartition(topic1, i, singletonList(createFullRange())));
+            expectedPartitions.add(new TopicPartition(topic2, i, singletonList(createFullRange())));
         }
 
-        assertThat(topicPartitions).isEqualTo(expectedPartitions);
+        assertEquals(expectedPartitions, topicPartitions);
     }
 
     @Test
-    void subscribeOnePartitionOfMultiplePartitionTopic() throws Exception {
+    void subscribeOnePartitionOfMultiplePartitionTopic() {
         String partition = topicNameWithPartition(topic1, 2);
 
         PulsarSubscriber subscriber = getTopicListSubscriber(singletonList(partition));
-        subscriber.open(operator().client(), operator().admin());
-
         Set<TopicPartition> partitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
+                subscriber.getSubscribedTopicPartitions(
+                        operator().admin(), new FullRangeGenerator(), NUM_PARALLELISM);
 
         TopicPartition desiredPartition = new TopicPartition(topic1, 2);
         assertThat(partitions).hasSize(1).containsExactly(desiredPartition);
     }
 
     @Test
-    void subscribeNonPartitionedTopicList() throws Exception {
+    void subscribeNonPartitionedTopicList() {
         PulsarSubscriber subscriber = getTopicListSubscriber(singletonList(topic4));
-        subscriber.open(operator().client(), operator().admin());
-
         Set<TopicPartition> partitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
+                subscriber.getSubscribedTopicPartitions(
+                        operator().admin(), new FullRangeGenerator(), NUM_PARALLELISM);
 
-        TopicPartition desiredPartition = new TopicPartition(topic4);
+        TopicPartition desiredPartition = new TopicPartition(topic4, -1);
         assertThat(partitions).hasSize(1).containsExactly(desiredPartition);
     }
 
     @Test
-    void subscribeNonPartitionedTopicPattern() throws Exception {
+    void subscribeNonPartitionedTopicPattern() {
         PulsarSubscriber subscriber =
                 getTopicPatternSubscriber(
-                        Pattern.compile("flink/regex/pulsar-subscriber-non-partitioned-topic-.*"),
+                        Pattern.compile("persistent://public/default/non-partitioned-topic*?"),
                         AllTopics);
-        subscriber.open(operator().client(), operator().admin());
 
         Set<TopicPartition> topicPartitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
+                subscriber.getSubscribedTopicPartitions(
+                        operator().admin(), new FullRangeGenerator(), NUM_PARALLELISM);
 
         Set<TopicPartition> expectedPartitions = new HashSet<>();
 
         expectedPartitions.add(new TopicPartition(topic4, -1));
         expectedPartitions.add(new TopicPartition(topic5, -1));
 
-        assertThat(topicPartitions).isEqualTo(expectedPartitions);
+        assertEquals(expectedPartitions, topicPartitions);
     }
 
     @Test
-    void topicPatternSubscriber() throws Exception {
+    void subscribeOnePartitionOfMultiplePartitionTopic() {
+        PulsarAdminRequest adminRequest =
+                new PulsarAdminRequest(operator().admin(), operator().config());
+        String partition = topicNameWithPartition(topic1, 2);
+
+        PulsarSubscriber subscriber = getTopicListSubscriber(singletonList(partition));
+        Set<TopicPartition> partitions =
+                subscriber.getSubscribedTopicPartitions(
+                        adminRequest, new FullRangeGenerator(), NUM_PARALLELISM);
+
+        TopicPartition desiredPartition =
+                new TopicPartition(topic1, 2, singletonList(createFullRange()));
+        assertThat(partitions).hasSize(1).containsExactly(desiredPartition);
+    }
+
+    @Test
+    void subscribeNonPartitionedTopicList() {
+        PulsarAdminRequest adminRequest =
+                new PulsarAdminRequest(operator().admin(), operator().config());
+        PulsarSubscriber subscriber = getTopicListSubscriber(singletonList(topic4));
+        Set<TopicPartition> partitions =
+                subscriber.getSubscribedTopicPartitions(
+                        adminRequest, new FullRangeGenerator(), NUM_PARALLELISM);
+
+        TopicPartition desiredPartition =
+                new TopicPartition(topic4, -1, singletonList(createFullRange()));
+        assertThat(partitions).hasSize(1).containsExactly(desiredPartition);
+    }
+
+    @Test
+    void subscribeNonPartitionedTopicPattern() {
+        PulsarAdminRequest adminRequest =
+                new PulsarAdminRequest(operator().admin(), operator().config());
         PulsarSubscriber subscriber =
                 getTopicPatternSubscriber(
-                        Pattern.compile("flink/regex/pulsar-subscriber-topic-.*"), AllTopics);
-        subscriber.open(operator().client(), operator().admin());
+                        Pattern.compile("persistent://public/default/non-partitioned-topic*?"),
+                        AllTopics);
 
         Set<TopicPartition> topicPartitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
+                subscriber.getSubscribedTopicPartitions(
+                        adminRequest, new FullRangeGenerator(), NUM_PARALLELISM);
+
+        Set<TopicPartition> expectedPartitions = new HashSet<>();
+
+        expectedPartitions.add(new TopicPartition(topic4, -1, singletonList(createFullRange())));
+        expectedPartitions.add(new TopicPartition(topic5, -1, singletonList(createFullRange())));
+
+        assertEquals(expectedPartitions, topicPartitions);
+    }
+
+    @Test
+    void topicPatternSubscriber() {
+        PulsarAdminRequest adminRequest =
+                new PulsarAdminRequest(operator().admin(), operator().config());
+        PulsarSubscriber subscriber =
+                getTopicPatternSubscriber(
+                        Pattern.compile("persistent://public/default/topic*?"), AllTopics);
+
+        Set<TopicPartition> topicPartitions =
+                subscriber.getSubscribedTopicPartitions(
+                        adminRequest, new FullRangeGenerator(), NUM_PARALLELISM);
 
         Set<TopicPartition> expectedPartitions = new HashSet<>();
 
         for (int i = 0; i < NUM_PARTITIONS_PER_TOPIC; i++) {
-            expectedPartitions.add(new TopicPartition(topic1, i));
-            expectedPartitions.add(new TopicPartition(topic3, i));
+            expectedPartitions.add(new TopicPartition(topic1, i, singletonList(createFullRange())));
+            expectedPartitions.add(new TopicPartition(topic3, i, singletonList(createFullRange())));
         }
 
-        assertThat(topicPartitions).isEqualTo(expectedPartitions);
-    }
-
-    @Test
-    void simpleTopicPatternSubscriber() throws Exception {
-        PulsarSubscriber subscriber =
-                getTopicPatternSubscriber(
-                        Pattern.compile("pulsar-subscriber-simple-topic-.*"), PersistentOnly);
-        subscriber.open(operator().client(), operator().admin());
-
-        Set<TopicPartition> topicPartitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
-
-        Set<TopicPartition> expectedPartitions = new HashSet<>();
-
-        for (int i = 0; i < NUM_PARTITIONS_PER_TOPIC; i++) {
-            expectedPartitions.add(new TopicPartition(topic6, i));
-        }
-
-        assertThat(topicPartitions).isEqualTo(expectedPartitions);
-    }
-
-    @Test
-    @Disabled("Disable for FLINK-31107")
-    void regexSubscriptionModeFilterForNonPersistentTopics() throws Exception {
-        PulsarSubscriber subscriber =
-                getTopicPatternSubscriber(
-                        Pattern.compile("pulsar-subscriber-simple-topic-.*"), NonPersistentOnly);
-        subscriber.open(operator().client(), operator().admin());
-
-        Set<TopicPartition> topicPartitions =
-                subscriber.getSubscribedTopicPartitions(new FullRangeGenerator(), NUM_PARALLELISM);
-
-        Set<TopicPartition> expectedPartitions = new HashSet<>();
-
-        for (int i = 0; i < NUM_PARTITIONS_PER_TOPIC; i++) {
-            expectedPartitions.add(new TopicPartition(topic7, i));
-        }
-
-        assertThat(topicPartitions).isEqualTo(expectedPartitions);
+        assertEquals(expectedPartitions, topicPartitions);
     }
 }

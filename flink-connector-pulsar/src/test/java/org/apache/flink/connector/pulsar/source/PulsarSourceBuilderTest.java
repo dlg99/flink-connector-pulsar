@@ -18,35 +18,92 @@
 
 package org.apache.flink.connector.pulsar.source;
 
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.pulsar.source.enumerator.topic.range.FixedKeysRangeGenerator;
+
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.junit.jupiter.api.Test;
 
+import static org.apache.flink.connector.pulsar.source.reader.deserializer.PulsarDeserializationSchema.pulsarSchema;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Unit tests for {@link PulsarSourceBuilder}. */
 class PulsarSourceBuilderTest {
 
     @Test
     void someSetterMethodCouldOnlyBeCalledOnce() {
-        PulsarSourceBuilder<String> builder = new PulsarSourceBuilder<>();
-        fillRequiredFields(builder);
-
-        assertThatThrownBy(() -> builder.setAdminUrl("admin-url2"))
-                .isInstanceOf(IllegalArgumentException.class);
-
-        assertThatThrownBy(() -> builder.setServiceUrl("service-url2"))
-                .isInstanceOf(IllegalArgumentException.class);
-
-        assertThatThrownBy(() -> builder.setSubscriptionName("set_subscription_name2"))
-                .isInstanceOf(IllegalArgumentException.class);
+        PulsarSourceBuilder<String> builder =
+                new PulsarSourceBuilder<String>()
+                        .setAdminUrl("admin-url")
+                        .setServiceUrl("service-url")
+                        .setSubscriptionName("set_subscription_name")
+                        .setSubscriptionType(SubscriptionType.Exclusive);
+        assertAll(
+                () ->
+                        assertThrows(
+                                IllegalArgumentException.class,
+                                () -> builder.setAdminUrl("admin-url2")),
+                () ->
+                        assertThrows(
+                                IllegalArgumentException.class,
+                                () -> builder.setServiceUrl("service-url2")),
+                () ->
+                        assertThrows(
+                                IllegalArgumentException.class,
+                                () -> builder.setSubscriptionName("set_subscription_name2")),
+                () ->
+                        assertThrows(
+                                IllegalArgumentException.class,
+                                () -> builder.setSubscriptionType(SubscriptionType.Shared)));
     }
 
     @Test
     void topicPatternAndListCouldChooseOnlyOne() {
         PulsarSourceBuilder<String> builder = new PulsarSourceBuilder<>();
-        fillRequiredFields(builder);
+        builder.setTopics("a", "b", "c");
+
         assertThatThrownBy(() -> builder.setTopicPattern("a-a-a"))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void rangeGeneratorRequiresKeyShared() {
+        PulsarSourceBuilder<String> builder = new PulsarSourceBuilder<>();
+        builder.setSubscriptionType(SubscriptionType.Shared);
+        FixedKeysRangeGenerator rangeGenerator =
+                FixedKeysRangeGenerator.builder().key("some").build();
+
+        assertThatThrownBy(() -> builder.setRangeGenerator(rangeGenerator))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void subscriptionTypeShouldNotBeOverriddenBySetMethod() {
+        PulsarSourceBuilder<String> builder = new PulsarSourceBuilder<>();
+        fillRequiredFields(builder);
+
+        Configuration config = new Configuration();
+        config.set(PulsarSourceOptions.PULSAR_SUBSCRIPTION_TYPE, SubscriptionType.Shared);
+        builder.setConfig(config);
+
+        assertThatThrownBy(() -> builder.setSubscriptionType(SubscriptionType.Failover))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void subscriptionTypeShouldNotBeOverriddenByConfiguration() {
+        PulsarSourceBuilder<String> builder = new PulsarSourceBuilder<>();
+        fillRequiredFields(builder);
+
+        builder.setSubscriptionType(SubscriptionType.Failover);
+
+        Configuration config = new Configuration();
+        config.set(PulsarSourceOptions.PULSAR_SUBSCRIPTION_TYPE, SubscriptionType.Shared);
+        assertThatThrownBy(() -> builder.setConfig(config))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     private void fillRequiredFields(PulsarSourceBuilder<String> builder) {
@@ -54,6 +111,6 @@ class PulsarSourceBuilderTest {
         builder.setServiceUrl("service-url");
         builder.setSubscriptionName("subscription-name");
         builder.setTopics("topic");
-        builder.setDeserializationSchema(Schema.STRING);
+        builder.setDeserializationSchema(pulsarSchema(Schema.STRING));
     }
 }

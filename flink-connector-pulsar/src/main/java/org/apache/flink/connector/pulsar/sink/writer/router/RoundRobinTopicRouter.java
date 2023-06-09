@@ -21,8 +21,6 @@ package org.apache.flink.connector.pulsar.sink.writer.router;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.connector.pulsar.sink.config.SinkConfiguration;
 import org.apache.flink.connector.pulsar.sink.writer.context.PulsarSinkContext;
-import org.apache.flink.connector.pulsar.source.enumerator.topic.TopicPartition;
-import org.apache.flink.util.Preconditions;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,12 +45,11 @@ public class RoundRobinTopicRouter<IN> implements TopicRouter<IN> {
 
     public RoundRobinTopicRouter(SinkConfiguration configuration) {
         this.partitionSwitchSize = configuration.getPartitionSwitchSize();
-        Preconditions.checkArgument(partitionSwitchSize > 0);
+        checkArgument(partitionSwitchSize > 0);
     }
 
     @Override
-    public TopicPartition route(
-            IN in, String key, List<TopicPartition> partitions, PulsarSinkContext context) {
+    public String route(IN in, String key, List<String> partitions, PulsarSinkContext context) {
         checkArgument(
                 !partitions.isEmpty(),
                 "You should provide topics for routing topic by message key hash.");
