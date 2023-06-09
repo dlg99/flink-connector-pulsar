@@ -142,6 +142,18 @@ public final class PulsarSinkOptions {
                     .withDescription(
                             "If you enable the topic auto creation, you should also configure the default partition number here");
 
+    /** @deprecated This config option was removed for better performance. */
+    @Deprecated
+    public static final ConfigOption<Integer> PULSAR_MAX_PENDING_MESSAGES_ON_PARALLELISM =
+            ConfigOptions.key(SINK_CONFIG_PREFIX + "maxPendingMessages")
+                    .intType()
+                    .defaultValue(1000)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The maximum number of pending messages in one sink parallelism.")
+                                    .build());
+
     ///////////////////////////////////////////////////////////////////////////////
     //
     // The configuration for ProducerConfigurationData part.

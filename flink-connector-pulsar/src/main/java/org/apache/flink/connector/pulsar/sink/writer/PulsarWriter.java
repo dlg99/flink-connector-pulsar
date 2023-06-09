@@ -75,8 +75,8 @@ public class PulsarWriter<IN> implements PrecommittingSinkWriter<IN, PulsarCommi
     private final DeliveryGuarantee deliveryGuarantee;
     private final PulsarSinkContext sinkContext;
     private final ProducerRegister producerRegister;
-    private final AtomicLong pendingMessages = new AtomicLong(0);
     private final MailboxExecutor mailboxExecutor;
+    private final AtomicLong pendingMessages = new AtomicLong(0);
 
     /**
      * Constructor creating a Pulsar writer.
