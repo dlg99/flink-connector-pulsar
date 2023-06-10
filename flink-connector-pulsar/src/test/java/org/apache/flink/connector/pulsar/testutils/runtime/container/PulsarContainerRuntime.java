@@ -20,11 +20,9 @@ package org.apache.flink.connector.pulsar.testutils.runtime.container;
 
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntime;
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntimeOperator;
-import org.apache.flink.util.DockerImageVersions;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PulsarContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
@@ -33,7 +31,6 @@ import org.testcontainers.utility.DockerImageName;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.apache.flink.util.DockerImageVersions.PULSAR;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.testcontainers.containers.PulsarContainer.BROKER_HTTP_PORT;
@@ -57,9 +54,11 @@ public class PulsarContainerRuntime implements PulsarRuntime {
             String.format("http://%s:%d", PULSAR_INTERNAL_HOSTNAME, BROKER_HTTP_PORT);
 
     /**
-     * Create a pulsar container provider by a predefined version, this constance {@link
-     * DockerImageVersions#PULSAR} should be bumped after the new pulsar release.
+     * Create a pulsar container provider by a predefined version, this constant should be bumped
+     * after the new pulsar release.
      */
+    public static final String PULSAR = "apachepulsar/pulsar:2.10.2";
+
     private final PulsarContainer container = new PulsarContainer(DockerImageName.parse(PULSAR));
 
     private final AtomicBoolean started = new AtomicBoolean(false);
@@ -88,18 +87,25 @@ public class PulsarContainerRuntime implements PulsarRuntime {
             return;
         }
 
-        // Override the default configuration in container for enabling the Pulsar transaction.
-        container.withClasspathResourceMapping(
-                "docker/bootstrap.sh", "/pulsar/bin/bootstrap.sh", BindMode.READ_ONLY);
-        // Waiting for the Pulsar border is ready.
+        // Override the default standalone configuration by system environments.
+        container.withEnv("PULSAR_PREFIX_transactionCoordinatorEnabled", "true");
+        container.withEnv("PULSAR_PREFIX_acknowledgmentAtBatchIndexLevelEnabled", "true");
+        container.withEnv("PULSAR_PREFIX_systemTopicEnabled", "true");
+        container.withEnv("PULSAR_PREFIX_brokerDeduplicationEnabled", "true");
+        container.withEnv("PULSAR_PREFIX_defaultNumberOfNamespaceBundles", "1");
+        // Change the default bootstrap script, it will override the default configuration
+        // and start a standalone Pulsar without streaming storage and function worker.
+        container.withCommand(
+                "sh",
+                "-c",
+                "/pulsar/bin/apply-config-from-env.py /pulsar/conf/standalone.conf && /pulsar/bin/pulsar standalone --no-functions-worker -nss");
+        // Waiting for the Pulsar broker and the transaction is ready after the container started.
         container.waitingFor(
                 forHttp(
                                 "/admin/v2/persistent/pulsar/system/transaction_coordinator_assign/partitions")
                         .forPort(BROKER_HTTP_PORT)
                         .forStatusCode(200)
                         .withStartupTimeout(Duration.ofMinutes(5)));
-        // Set custom startup script.
-        container.withCommand("sh /pulsar/bin/bootstrap.sh");
 
         // Start the Pulsar Container.
         container.start();
